@@ -9,8 +9,6 @@ service:
   type: ClusterIP
   port: 80
 
-message: "Hello from the web frontend!"
-
 resources:
   limits:
     cpu: 100m
@@ -18,3 +16,24 @@ resources:
   requests:
     cpu: 50m
     memory: 32Mi
+
+probes:
+  liveness:
+    enabled: false
+    httpGet:
+      path: /
+    initialDelaySeconds: 10
+  readiness:
+    enabled: false
+    httpGet:
+      path: /
+    initialDelaySeconds: 5
+
+configMap:
+  enabled: true
+  mountPath: /usr/share/nginx/html
+
+message: "Hello from the web frontend!"
+
+env: []
+podAnnotations: {}

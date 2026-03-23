@@ -1,0 +1,14 @@
+replicaCount: 2
+
+image:
+  tag: "alpine"
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+message: "Hello from hello-web"

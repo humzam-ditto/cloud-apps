@@ -16,3 +16,22 @@ resources:
   requests:
     cpu: 100m
     memory: 64Mi
+
+probes:
+  liveness:
+    enabled: true
+    httpGet:
+      path: /get
+    initialDelaySeconds: 10
+  readiness:
+    enabled: true
+    httpGet:
+      path: /get
+    initialDelaySeconds: 5
+
+configMap:
+  enabled: false
+  mountPath: ""
+
+env: []
+podAnnotations: {}
