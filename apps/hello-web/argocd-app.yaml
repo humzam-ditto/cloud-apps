@@ -16,7 +16,7 @@ spec:
         - harness-release.yaml
   destination:
     server: https://kubernetes.default.svc
-    namespace: staging
+    namespace: hello-web-staging
   syncPolicy:
     automated:
       prune: true
