@@ -1,0 +1,23 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: hello-web-staging
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/humzam-ditto/cloud-apps
+    targetRevision: main
+    path: apps/hello-web
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-staging.yaml
+        - harness-release.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: staging
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
