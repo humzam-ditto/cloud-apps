@@ -3,6 +3,12 @@ kind: Application
 metadata:
   name: hello-web-staging
   namespace: argocd
+  labels:
+    harness.io/accountId: vhalP_TdQWmkLSimDvY0SA
+    harness.io/orgIdentifier: default
+    harness.io/projectIdentifier: Playground
+    harness.io/serviceRef: hellowebservice
+    harness.io/envRef: hellowebstaging
 spec:
   project: mgmt-dev-usw2-ops-int-clusters
   source:
