@@ -1,0 +1,40 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: hello-web
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - env: staging
+            namespace: hello-web-staging
+  template:
+    metadata:
+      name: "hello-web-{{env}}"
+      labels:
+        harness.io/accountId: vhalP_TdQWmkLSimDvY0SA
+        harness.io/orgIdentifier: default
+        harness.io/projectIdentifier: Playground
+        harness.io/serviceRef: hellowebservice
+        harness.io/envRef: hellowebstaging
+    spec:
+      project: mgmt-dev-usw2-ops-int-clusters
+      source:
+        repoURL: https://github.com/humzam-ditto/cloud-apps
+        targetRevision: main
+        path: apps/hello-web
+        helm:
+          valueFiles:
+            - values.yaml
+            - values-staging.yaml
+            - harness-release.yaml
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{namespace}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
