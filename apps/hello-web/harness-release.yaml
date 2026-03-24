@@ -1,1 +1,2 @@
-{}
+podAnnotations:
+  harness.io/version: "0.0.1"
