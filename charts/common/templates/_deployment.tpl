@@ -21,10 +21,13 @@ spec:
       {{- include "common.selectorLabels" . | nindent 6 }}
   template:
     metadata:
-      {{- with .Values.podAnnotations }}
       annotations:
+        {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
-      {{- end }}
+        {{- end }}
+        {{- if .Values.harnessVersion }}
+        harness.io/version: {{ .Values.harnessVersion | quote }}
+        {{- end }}
       labels:
         {{- include "common.selectorLabels" . | nindent 8 }}
     spec:

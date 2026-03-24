@@ -37,3 +37,4 @@ message: "Hello from the web frontend!"
 
 env: []
 podAnnotations: {}
+harnessVersion: "0.0.1"
