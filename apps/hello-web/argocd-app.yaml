@@ -4,7 +4,7 @@ metadata:
   name: hello-web-staging
   namespace: argocd
 spec:
-  project: default
+  project: mgmt-dev-usw2-ops-int-clusters
   source:
     repoURL: https://github.com/humzam-ditto/cloud-apps
     targetRevision: main
