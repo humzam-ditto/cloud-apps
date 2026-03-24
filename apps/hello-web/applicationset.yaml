@@ -1,23 +1,23 @@
 apiVersion: argoproj.io/v1alpha1
 kind: ApplicationSet
 metadata:
-  name: hello-web-staging
-  namespace: argocd
+  name: hello-web-staging-appset
+  namespace: argo
 spec:
   generators:
     - list:
         elements:
-          - env: staging
+          - cluster: staging
             namespace: hello-web-staging
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
   template:
     metadata:
-      name: "hello-web-{{env}}"
+      name: hello-web-{{.cluster}}
       labels:
-        harness.io/accountId: vhalP_TdQWmkLSimDvY0SA
-        harness.io/orgIdentifier: default
-        harness.io/projectIdentifier: Playground
-        harness.io/serviceRef: hellowebservice
         harness.io/envRef: hellowebstaging
+        harness.io/serviceRef: hellowebservice
     spec:
       project: mgmt-dev-usw2-ops-int-clusters
       source:
@@ -31,10 +31,10 @@ spec:
             - harness-release.yaml
       destination:
         server: https://kubernetes.default.svc
-        namespace: "{{namespace}}"
+        namespace: "{{.namespace}}"
       syncPolicy:
         automated:
           prune: true
           selfHeal: true
-        syncOptions:
-          - CreateNamespace=true
+  syncPolicy:
+    applicationsSync: create-update
