@@ -15,7 +15,7 @@ Update Release Repo → Harness writes values to git (e.g. image tag)
         ↓
 Merge PR → Harness auto-merges the change into main
         ↓
-Fetch Linked Apps → finds the ArgoCD Application via the ApplicationSet
+Fetch Linked Apps → reads the ApplicationSet file, finds the child Application it generated, and triggers a sync
         ↓
 ArgoCD syncs → cluster pulls latest state from git
 ```
