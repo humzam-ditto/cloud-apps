@@ -210,8 +210,10 @@ The `Fetch Linked Apps` step only works with ApplicationSets registered in Harne
 **The Deployment Repo Manifest must point to applicationset.yaml**
 Not `Chart.yaml`, not `argocd-app.yaml`. Harness parses this file to get the ApplicationSet name and find linked Applications.
 
-**GitHub connector must use a dedicated PAT**
-The `gh auth token` CLI token does not work. Create a GitHub PAT with `repo`, `admin:repo_hook`, and `user:email` scopes and store it as a Harness secret. When pasting the token into Harness, watch for trailing whitespace/newlines.
+**GitHub connector: prefer a GitHub App over a PAT**
+A GitHub App is the preferred authentication method for production use — it has finer-grained permissions, doesn't expire, and isn't tied to a personal account. For a POC a PAT works, but plan to migrate before going to prod.
+
+If using a PAT: the `gh auth token` CLI token does not work. Create a dedicated GitHub PAT with `repo`, `admin:repo_hook`, and `user:email` scopes and store it as a Harness secret. When pasting the token into Harness, watch for trailing whitespace/newlines.
 
 **Namespace is set on the ApplicationSet, not the pipeline**
 The destination namespace is defined in the ApplicationSet template. The pipeline's Environment tab only needs the cluster — not an Infrastructure Definition.
