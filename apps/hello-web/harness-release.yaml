@@ -1,3 +1,3 @@
-harnessVersion: "1.4.0"
+harnessVersion: "1.5.0"
 podAnnotations:
   harness.io/version: "0.0.1"
