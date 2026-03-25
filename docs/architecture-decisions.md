@@ -44,3 +44,29 @@ Every app that needs pipeline-managed deployments must have:
 1. An ApplicationSet registered in Harness GitOps UI
 2. A corresponding `applicationset.yaml` in the repo for documentation
 3. The ApplicationSet labels must match the Harness Service and Environment identifiers exactly (`harness.io/serviceRef`, `harness.io/envRef`)
+
+---
+
+## 3. New App Onboarding: Manual UI setup vs automated provisioning
+
+**The problem**
+
+Currently, onboarding a new app requires several manual steps in the Harness UI: creating the ApplicationSet, Service, Environment, and Pipeline. This doesn't scale and is error-prone as the number of apps grows.
+
+**What needs to be decided**
+
+How should new apps be provisioned? Options:
+
+- **Manual UI** — what we do today. Works for a small number of apps but doesn't scale and has no audit trail for the Harness-side config.
+- **Harness Terraform provider** — define all Harness resources (Services, Environments, ApplicationSets, Pipelines) as Terraform. A new app is added by writing a Terraform module and running `terraform apply`. Auditable, repeatable, and codified.
+- **Harness API** — programmatically create Harness resources via the REST API, potentially triggered by a self-service workflow or a script in this repo.
+
+**Open questions**
+
+- Should Harness resource definitions (Services, Environments, Pipelines) live in this repo alongside the Helm charts, or in a separate infra repo?
+- Can the Pipeline Template (`gitops-deploy-stage`) be provisioned via Terraform/API so it doesn't need to be manually created per project?
+- How do we handle the Harness UI-created ApplicationSet being the source of truth today — can that be fully replaced by Terraform so git is the only source of truth?
+
+**Recommendation**
+
+Invest in the Harness Terraform provider before scaling beyond a handful of apps. The manual UI approach will become a bottleneck quickly. This should be explored as part of designing the automated app onboarding workflow.
