@@ -36,3 +36,4 @@ configMap:
 env: []
 podAnnotations: {}
 harnessVersion: "0.0.1"
+imageTag: ""
