@@ -70,3 +70,30 @@ How should new apps be provisioned? Options:
 **Recommendation**
 
 Invest in the Harness Terraform provider before scaling beyond a handful of apps. The manual UI approach will become a bottleneck quickly. This should be explored as part of designing the automated app onboarding workflow.
+
+---
+
+## 4. Pipeline Reuse: Pipeline Templates vs Stage Templates
+
+**Background**
+
+Harness supports two levels of templating:
+
+- **Pipeline Template** — the entire pipeline is a template. Each app's pipeline is an instance of it. Currently what we use (`gitops-deploy-stage` saved as a Pipeline template).
+- **Stage Template** — just the Deploy stage is a template. You build a pipeline per app but drop in the reusable stage. Allows more flexibility at the pipeline level (e.g. different variables, multiple stages, app-specific pre/post steps).
+
+**The tension**
+
+With a Pipeline Template, all apps share the exact same pipeline structure. This is simple but inflexible — if one app needs an extra step (e.g. a database migration before deploy), it can't deviate without breaking out of the template.
+
+With a Stage Template, each app has its own pipeline but reuses the core deploy logic. More flexible but slightly more setup per app.
+
+**Open questions**
+
+- Will any apps need app-specific pipeline steps that don't belong in a shared template?
+- Should the pipeline template expose Service and Environment as runtime inputs so one template truly covers all apps, or is a separate pipeline per app cleaner?
+- As we move toward automated onboarding (see item 3), which approach is easier to provision programmatically?
+
+**Current state**
+
+Using a Pipeline Template (`gitops-deploy-stage v1`). Service and Environment are currently hardcoded in the template rather than runtime inputs, which limits true reuse. This needs to be fixed before the template can be used generically across all apps.
