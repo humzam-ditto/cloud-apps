@@ -97,3 +97,36 @@ With a Stage Template, each app has its own pipeline but reuses the core deploy 
 **Current state**
 
 Using a Pipeline Template (`gitops-deploy-stage v1`). Service and Environment are currently hardcoded in the template rather than runtime inputs, which limits true reuse. This needs to be fixed before the template can be used generically across all apps.
+
+---
+
+## 5. Pipeline Template Versioning: How to safely roll out template changes
+
+**Background**
+
+Harness Pipeline Templates support versioning (`v1`, `v2`, etc.) and a `STABLE` tag that pipelines can pin to. Understanding how this works is important before rolling out template changes in production.
+
+**How versioning works**
+
+- Pipelines pin to either a specific version (e.g. `v1`) or to `STABLE`
+- `STABLE` is a floating tag — it points to whichever version you promote to stable
+- Editing a version in place causes pipelines using it to drift and require manual reconciliation
+- Creating a new version leaves existing pipelines untouched
+
+**The right workflow for template changes**
+
+1. Save changes as a new version (e.g. `v2`) rather than overwriting the current stable version
+2. Test `v2` by creating a throwaway pipeline explicitly pinned to `v2`
+3. Once validated, promote `v2` to **Stable** in the template settings
+4. Pipelines pinned to `STABLE` automatically use `v2` on their next run — no reconciliation needed
+
+**Why this matters for prod**
+
+Overwriting a version in place is the equivalent of force-pushing to main — it silently changes what all consumers are running. In prod, this could cause unexpected pipeline behavior mid-deployment. The versioned promotion flow ensures:
+- No surprise changes to running pipelines
+- A testable path before any change reaches prod pipelines
+- A clear rollback path — if `v2` causes issues, re-promote `v1` to Stable
+
+**Current state**
+
+`v1` was edited in place during POC, which required manual reconciliation on all pipelines. Before going to prod, establish the convention of always creating new versions rather than editing existing ones.
