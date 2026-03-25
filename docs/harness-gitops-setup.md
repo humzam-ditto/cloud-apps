@@ -1,6 +1,6 @@
 # Harness GitOps Pipeline Setup Guide
 
-This document covers the end-to-end process for setting up a Harness GitOps pipeline for a new app. It was written based on hands-on experience setting up `hello-web` and captures lessons learned along the way.
+This document covers the end-to-end process for setting up a Harness GitOps pipeline for a new app. It was written based on hands-on experience setting up `hello-web` and `hello-api` and captures lessons learned along the way.
 
 ---
 
@@ -11,7 +11,7 @@ Harness GitOps uses ArgoCD under the hood. The pipeline flow is:
 ```
 Pipeline triggered (with input variables)
         ↓
-Update Release Repo → Harness writes values to git (e.g. image tag)
+Update Release Repo → Harness writes values to git (e.g. version)
         ↓
 Merge PR → Harness auto-merges the change into main
         ↓
@@ -29,16 +29,16 @@ Each app lives under `apps/<app-name>/` and contains:
 ```
 apps/hello-web/
 ├── Chart.yaml                  # Helm chart definition
-├── values.yaml                 # Base defaults
+├── values.yaml                 # Base defaults (must include harnessVersion)
 ├── values-dev.yaml             # Dev environment overrides
 ├── values-staging.yaml         # Staging environment overrides
 ├── values-prod.yaml            # Prod environment overrides
 ├── harness-release.yaml        # Written by Harness on each pipeline run
-├── applicationset.yaml         # ArgoCD ApplicationSet (source of truth)
+├── applicationset.yaml         # ArgoCD ApplicationSet (source of truth copy)
 └── templates/                  # Helm templates (use common library)
 ```
 
-### values stacking
+### Values stacking
 
 ArgoCD applies values files left to right, last file wins:
 
@@ -55,11 +55,20 @@ values.yaml → values-staging.yaml → harness-release.yaml
 This file is the target of Harness pipeline writes. Keep it in git with a default value:
 
 ```yaml
-podAnnotations:
-  harness.io/version: "0.0.1"
+harnessVersion: "0.0.1"
 ```
 
-Harness updates this on every pipeline run. Keeping it isolated means Harness commits never touch your real values files.
+Harness updates `harnessVersion` on every pipeline run. Keeping it isolated means Harness commits never touch your real values files.
+
+### harnessVersion in values.yaml
+
+Every app's `values.yaml` must include `harnessVersion` so the common deployment template can render it as a pod annotation:
+
+```yaml
+harnessVersion: "0.0.1"
+```
+
+The `common` library chart renders this as `harness.io/version` on the pod, which forces a pod restart on each pipeline run even if the image hasn't changed.
 
 ---
 
@@ -68,7 +77,7 @@ Harness updates this on every pipeline run. Keeping it isolated means Harness co
 Before setting up a pipeline for a new app, the following must exist in Harness:
 
 1. **GitOps Agent** — installed in the target cluster, visible and healthy in GitOps → Agents
-2. **Repository** — `cloud-apps` connected in GitOps → Repositories with a GitHub PAT (not the `gh auth token` CLI token — create a dedicated PAT with `repo`, `admin:repo_hook`, and `user:email` scopes)
+2. **Repository** — `cloud-apps` connected in GitOps → Repositories (see GitHub connector note in Key Lessons below)
 3. **Cluster** — registered in GitOps → Clusters, linked to the Agent
 
 ---
@@ -87,16 +96,50 @@ dependencies:
     repository: "file://../../charts/common"
 ```
 
-Add env values files and `harness-release.yaml`.
+Run `helm dependency update apps/<app-name>` to package the library.
 
-### 2. Create the ApplicationSet in Harness
+Add env values files, `harness-release.yaml`, and ensure `harnessVersion: "0.0.1"` is in `values.yaml`.
+
+### 2. Create the Harness Service
+
+**Services → New Service**
+
+- **Name**: `<app-name>-service`
+- **Deployment type**: Kubernetes
+- Check **GitOps**
+- **Manifests**:
+  - **Release Repo Manifest**:
+    - File path: `apps/<app-name>/harness-release.yaml`
+  - **Deployment Repo Manifest**:
+    - File path: `apps/<app-name>/applicationset.yaml`
+
+Note the Service **Id** shown under the name (e.g. `helloweb service`) — you'll need it in step 3.
+
+> **Important**: The Deployment Repo Manifest must point to `applicationset.yaml`. Pointing it at `Chart.yaml` or a standalone `Application` manifest will cause the `Fetch Linked Apps` step to fail.
+
+### 3. Create the Environment
+
+**Environments → New Environment**
+
+- **Name**: `<app-name>-staging`
+- **Type**: Pre-Production
+
+After saving, go to the Environment detail page → **GitOps Clusters tab** → link it to the cluster.
+
+Note the Environment **Id** shown under the name — you'll need it in step 4.
+
+> **Note**: Infrastructure Definitions are not used in GitOps pipelines. Cluster linkage is done via the GitOps Clusters tab on the Environment.
+
+### 4. Create the ApplicationSet in Harness
 
 **GitOps → Applications → Application Set → New Application Set**
 
-This is the critical step. The ApplicationSet must be created through the Harness UI — not just as a file in git — so Harness registers it internally.
+This is the critical step. The ApplicationSet **must** be created through the Harness UI — not just as a file in git — so Harness registers it internally. The `Fetch Linked Apps` pipeline step queries Harness's internal registry, not git.
 
 Key settings:
-- **Sync Policy**: `Create-Update` (creates and updates apps, never deletes)
+- **Name**: `<app-name>-staging-appset`
+- **GitOps Agent**: `org.mgmtdevusw2opsint`
+- **Sync Policy**: `Create-Update`
 - **Generator Type**: `List`
 - **Generator elements**:
   ```yaml
@@ -112,10 +155,10 @@ Key settings:
     metadata:
       name: <app-name>-{{.cluster}}
       labels:
-        harness.io/serviceRef: <service-id>
-        harness.io/envRef: <env-id>
+        harness.io/serviceRef: <service-id-from-step-2>
+        harness.io/envRef: <env-id-from-step-3>
     spec:
-      project: <argocd-project>
+      project: mgmt-dev-usw2-ops-int-clusters
       source:
         repoURL: https://github.com/humzam-ditto/cloud-apps
         targetRevision: main
@@ -134,41 +177,23 @@ Key settings:
           selfHeal: true
   ```
 
-> **Note**: The labels `harness.io/serviceRef` and `harness.io/envRef` are what Harness uses to link the Application to a Service and Environment. These must match exactly.
+After creating, ArgoCD will automatically generate the child Application (e.g. `<app-name>-staging`).
 
-After creating the ApplicationSet, ArgoCD will automatically generate the child Application (e.g. `hello-web-staging`).
+### 5. Sync applicationset.yaml to the repo
 
-### 3. Sync the applicationset.yaml file in the repo
-
-After creating the ApplicationSet in the UI, copy its YAML (stripped of runtime metadata like `uid`, `resourceVersion`, `managedFields`, `status`) and update `apps/<app-name>/applicationset.yaml` in the repo to keep it as the source of truth.
-
-### 4. Create the Harness Service
-
-**Services → New Service**
-
-- **Deployment type**: Kubernetes (GitOps)
-- **Manifests**:
-  - **Release Repo Manifest**:
-    - File path: `apps/<app-name>/harness-release.yaml`
-  - **Deployment Repo Manifest**:
-    - File path: `apps/<app-name>/applicationset.yaml`
-
-> **Important**: The Deployment Repo Manifest must point to the `applicationset.yaml` file. Pointing it at `Chart.yaml` or a standalone `Application` manifest will cause the `Fetch Linked Apps` step to fail.
-
-### 5. Create the Environment
-
-**Environments → New Environment**
-
-- Type: Pre-Production (staging) or Production
-- After creating, go to the Environment detail page → **GitOps Clusters tab** → link it to the cluster
-
-> **Note**: Infrastructure Definitions are not used in GitOps pipelines. Cluster linkage is done via the GitOps Clusters tab on the Environment.
+After creating the ApplicationSet in the UI, copy its YAML, strip runtime metadata (`uid`, `resourceVersion`, `managedFields`, `status`), and commit it to `apps/<app-name>/applicationset.yaml`. This keeps the repo as a source-of-truth reference.
 
 ### 6. Create the Pipeline
 
+**Option A — Use the existing Pipeline Template (recommended)**
+
+When creating a new pipeline, select **Use Template** and pick `gitops-deploy-stage`. Supply the Service and Environment as inputs. This reuses the same execution pattern as all other apps.
+
+**Option B — Create from scratch**
+
 **Pipelines → New Pipeline**
 
-Add a pipeline variable for the version/tag:
+Add a pipeline variable:
 - Name: `version`
 - Type: String
 - Value: `<+input>` (runtime input)
@@ -176,29 +201,26 @@ Add a pipeline variable for the version/tag:
 Add a **Deploy stage**:
 - Deployment type: **Kubernetes**
 - Check the **GitOps** checkbox
-- **Service tab**: select the service created in step 4
-- **Environment tab**: select the environment, uncheck "Deploy to all clusters", select the specific cluster
+- **Service tab**: select the service from step 2
+- **Environment tab**: select the environment from step 3, uncheck "Deploy to all clusters", select the specific cluster
 
-#### Execution steps (auto-generated, configure each):
-
-**Update Release Repo**:
-- Check **Allow Empty Commit** (prevents failure when value hasn't changed)
+Configure the **Update Release Repo** step:
+- Check **Allow Empty Commit**
 - Add variable:
   - Name: `harnessVersion`
   - Type: String
   - Value: `<+pipeline.variables.version>`
 
-**Merge PR**: leave as default
-
-**Fetch Linked Apps**: leave as default — it finds the Application via the ApplicationSet name from the Deployment Repo manifest
+Leave **Merge PR** and **Fetch Linked Apps** as default.
 
 ### 7. Run the pipeline
 
-When running, enter a version string (e.g. `0.0.2`). Harness will:
-1. Write `harnessVersion: "0.0.2"` to `harness-release.yaml`
+Enter a version string (e.g. `1.0.0`). Harness will:
+1. Write `harnessVersion: "1.0.0"` to `harness-release.yaml`
 2. Create a PR on a new branch
 3. Auto-merge it to `main`
 4. ArgoCD detects the change and syncs the cluster
+5. Pod restarts with annotation `harness.io/version: "1.0.0"`
 
 ---
 
@@ -208,7 +230,10 @@ When running, enter a version string (e.g. `0.0.2`). Harness will:
 The `Fetch Linked Apps` step only works with ApplicationSets registered in Harness. Standalone Applications will always return `Selected: 0`. Create the ApplicationSet through the Harness UI, not just as a file in git.
 
 **The Deployment Repo Manifest must point to applicationset.yaml**
-Not `Chart.yaml`, not `argocd-app.yaml`. Harness parses this file to get the ApplicationSet name and find linked Applications.
+Not `Chart.yaml`, not a standalone `argocd-app.yaml`. Harness parses this file to get the ApplicationSet name and find linked Applications.
+
+**Create Service and Environment before the ApplicationSet**
+The ApplicationSet template requires the Service ID and Environment ID in its labels. Create the Service and Environment first so you have those IDs ready.
 
 **GitHub connector: prefer a GitHub App over a PAT**
 A GitHub App is the preferred authentication method for production use — it has finer-grained permissions, doesn't expire, and isn't tied to a personal account. For a POC a PAT works, but plan to migrate before going to prod.
@@ -221,8 +246,14 @@ The destination namespace is defined in the ApplicationSet template. The pipelin
 **harness-release.yaml isolates Harness commits**
 By giving Harness a dedicated file to write to, all auto-generated pipeline commits are isolated from hand-crafted values files. This keeps git history clean and prevents Harness from overwriting environment-specific configuration.
 
+**harnessVersion must be wired through the common library chart**
+Harness writes `harnessVersion` as a top-level key in `harness-release.yaml`. The `common` deployment template reads this and renders it as the `harness.io/version` pod annotation. Without this wiring, the pod will not restart on pipeline runs and the annotation will stay stale.
+
 **Release Repo and Deployment Repo can be the same repo**
 For simplicity, both manifests point to `cloud-apps`. In larger setups these are often split — a separate config repo receives Harness writes while the chart repo remains read-only.
+
+**Reuse the Pipeline Template for new apps**
+The `gitops-deploy-stage` pipeline template captures the full execution pattern. New apps should use it rather than building pipelines from scratch.
 
 ---
 
