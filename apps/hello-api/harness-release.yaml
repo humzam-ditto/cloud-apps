@@ -1,2 +1,2 @@
-harnessVersion: "1.160"
-imageTag: "latest"
+harnessVersion: "1.17.0"
+imageTag: "bad-tag"
