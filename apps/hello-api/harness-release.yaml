@@ -1,2 +1,2 @@
-harnessVersion: 1.14.0
-imageTag: latest
+harnessVersion: 1.15.0
+imageTag: bad-tag
