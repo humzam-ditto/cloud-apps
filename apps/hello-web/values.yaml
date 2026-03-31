@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: nginx
-  tag: "alpine"
+  tag: "bad-alpine"
   pullPolicy: IfNotPresent
 
 service:
