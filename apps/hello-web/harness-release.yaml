@@ -1,2 +1,2 @@
-harnessVersion: 1.16.0
-imageTag: bad-alpine
+harnessVersion: 1.15.0
+imageTag: alpine
