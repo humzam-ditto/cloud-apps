@@ -288,3 +288,75 @@ Drift detection and self-healing are not available in Native Kubernetes. For lon
 **Current state**
 
 Not yet implemented. GitOps is the only active deployment model. Native Kubernetes pipeline support should be built when the first ephemeral workload use case is identified.
+
+---
+
+## 9. Deployment Health Gating: Harness CV vs Argo Rollouts AnalysisTemplates
+
+**Background**
+
+When using progressive delivery (canary, blue/green), something needs to decide whether a deployment is healthy enough to promote to the next traffic percentage — or whether to abort and roll back. Two tools can fill this role: Harness Continuous Verification (CV) and Argo Rollouts AnalysisTemplates. They are complementary, not competing — but understanding what each does is important before designing rollout pipelines.
+
+**What each tool does**
+
+Argo Rollouts controls **traffic splitting mechanics**. It manages how traffic is shifted between stable and canary pods, integrating with ingress controllers and service meshes (Istio, NGINX, ALB) to do weighted routing. It defines the rollout steps and cadence in a `Rollout` manifest. It does not evaluate whether the canary is healthy — it only manages the percentages.
+
+Harness CV evaluates **whether the deployment is healthy** by querying your observability stack (Datadog, Prometheus, New Relic, Splunk, etc.). It runs as a pipeline step, compares canary metrics against an ML-derived baseline from prior deployments, and makes a pass/fail judgement. It does not control traffic routing.
+
+**How they combine**
+
+They are complementary. Argo Rollouts handles the mechanics of traffic shifting; CV provides the intelligence about whether to proceed:
+
+```
+Argo Rollouts shifts 10% traffic to canary pods
+    → Harness CV queries Datadog for error rate, latency, log anomalies
+    → CV: healthy ✓ → promote
+Argo Rollouts shifts to 50%
+    → CV: p99 latency spiked 3x vs baseline ✗ → rollback
+    → Argo Rollouts shifts 100% traffic back to stable
+```
+
+**What are AnalysisTemplates**
+
+AnalysisTemplates are Argo Rollouts' built-in alternative to CV — a Kubernetes CRD that defines metric queries and pass/fail thresholds directly in YAML. Argo Rollouts runs them during the rollout to gate promotion without needing Harness.
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: error-rate-check
+spec:
+  metrics:
+  - name: error-rate
+    interval: 1m
+    successCondition: result[0] < 0.05
+    failureLimit: 3
+    provider:
+      prometheus:
+        address: http://prometheus:9090
+        query: |
+          sum(rate(http_requests_total{status=~"5.."}[1m]))
+          /
+          sum(rate(http_requests_total[1m]))
+```
+
+**Comparison**
+
+| | AnalysisTemplates | Harness CV |
+|---|---|---|
+| Defined as | Kubernetes CRD in Git | Harness pipeline step |
+| Metric sources | Prometheus, Datadog, webhooks, custom jobs | Same + Splunk, ELK, AppDynamics, and more |
+| Threshold logic | Manually written (`result < 0.05`) | ML-derived baseline from prior deployments |
+| Baseline comparison | Static — you define what healthy means | Dynamic — Harness learns what normal looks like |
+| Kubernetes-native | Yes — lives alongside the Rollout manifest | No — lives in Harness outside the cluster |
+| Works without Harness | Yes | No |
+
+**Recommendation**
+
+Use Harness CV as the primary health gating mechanism. The ML-based baseline comparison is more powerful than manually tuned thresholds — it catches regressions that are hard to anticipate upfront (e.g. a latency spike that's only anomalous relative to time-of-day patterns). CV also integrates directly into pipeline rollback, so no additional wiring is needed.
+
+Reserve AnalysisTemplates for cases where health check logic must live in Git alongside the rollout definition, or where Harness is unavailable in the execution path.
+
+**Current state**
+
+Not yet implemented. No CV health sources have been configured. This should be designed alongside the first canary or blue/green pipeline.
