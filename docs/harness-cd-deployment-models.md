@@ -1,0 +1,725 @@
+# Harness CD Deployment Models: Engineering Evaluation
+
+This document compares the three primary Kubernetes deployment models available in Harness CD: **Harness GitOps (ArgoCD-based)**, **Native Helm**, and **Native Kubernetes**. It is intended to inform architectural decisions about which model to use, when, and how to govern them at scale.
+
+---
+
+## Table of Contents
+
+1. [Mental Model: How the Three Models Differ](#1-mental-model-how-the-three-models-differ)
+2. [Harness GitOps (ArgoCD-based)](#2-harness-gitops-argocd-based)
+3. [Native Helm](#3-native-helm)
+4. [Native Kubernetes](#4-native-kubernetes)
+5. [Cross-Cutting Platform Concerns](#5-cross-cutting-platform-concerns)
+6. [Comparison Matrix](#6-comparison-matrix)
+7. [Decision Guide: When to Choose Each Model](#7-decision-guide-when-to-choose-each-model)
+8. [Known Limitations and Gotchas](#8-known-limitations-and-gotchas)
+
+---
+
+## 1. Mental Model: How the Three Models Differ
+
+Before diving into each model, it is important to understand the fundamental execution model that separates them.
+
+| Dimension | Harness GitOps | Native Helm | Native Kubernetes |
+|---|---|---|---|
+| Who does the apply? | ArgoCD controller (pull model) | Harness Delegate runs `helm install/upgrade` | Harness Delegate runs `kubectl apply` |
+| Source of truth | Git repo (always) | Harness pipeline context (push model) | Harness pipeline context (push model) |
+| State reconciliation | Continuous (ArgoCD watches) | One-shot at pipeline execution | One-shot at pipeline execution |
+| Deployment strategies | Rolling only (unless Argo Rollouts added) | Rolling, Canary, Blue/Green (Delegate 84300+) | Rolling, Canary, Blue/Green (all natively) |
+| Helm support | Yes (ArgoCD renders charts at sync time) | Yes (via `helm upgrade`) | Yes (Harness renders chart via `helm template`, then `kubectl apply`) |
+| Drift detection | Built-in (ArgoCD reconciliation loop) | Not available | Not available |
+
+**The critical distinction** between "Native Kubernetes" and "Native Helm" in Harness is often misunderstood:
+
+- **Native Kubernetes** (deployment type = `Kubernetes`) — Harness fetches manifests or Helm charts, renders them via `helm template`, and deploys using `kubectl apply`. Harness owns the Kubernetes resource state, enabling canary/blue-green and Harness-managed rollbacks.
+- **Native Helm** (deployment type = `NativeHelm`) — Harness calls `helm upgrade --install`. Helm owns the release state (stored in Kubernetes secrets). Harness has less visibility into individual resources but full Helm feature support (hooks, subcharts).
+- **Harness GitOps** — Neither Harness nor the Delegate deploys directly. ArgoCD pulls from Git and applies. Harness manages the pipeline that writes to Git and triggers the sync.
+
+---
+
+## 2. Harness GitOps (ArgoCD-based)
+
+### 2.1 How It Works Technically
+
+Harness GitOps is a thin enterprise control plane layered on top of ArgoCD. The underlying sync engine is ArgoCD; Harness adds governance, RBAC, pipelines, audit trails, and a unified multi-cluster dashboard on top.
+
+**Architecture components:**
+
+```
+┌─────────────────────────────────────────────┐
+│              Harness SaaS Platform          │
+│  ┌─────────┐  ┌──────────┐  ┌───────────┐  │
+│  │Pipeline │  │Governance│  │  Audit /  │  │
+│  │ Engine  │  │(OPA/RBAC)│  │ Dashboard │  │
+│  └────┬────┘  └──────────┘  └───────────┘  │
+└───────┼─────────────────────────────────────┘
+        │ HTTPS (outbound only)
+┌───────▼─────────────────────────────────────┐
+│          Harness GitOps Agent (per cluster)  │
+│  ┌──────────────┐  ┌──────────┐  ┌───────┐  │
+│  │ArgoCD App    │  │ArgoCD    │  │Redis  │  │
+│  │Controller    │  │Repo Srvr │  │Cache  │  │
+│  └──────────────┘  └──────────┘  └───────┘  │
+└─────────────────────────────────────────────┘
+        │
+┌───────▼──────────────────────────────────────┐
+│  Git Repository (source of truth)            │
+│  apps/<app-name>/harness-release.yaml        │
+│  apps/<app-name>/values-<env>.yaml           │
+│  apps/<app-name>/applicationset.yaml         │
+└──────────────────────────────────────────────┘
+```
+
+The GitOps Agent is deployed once per cluster (or one per logical grouping). It establishes an outbound HTTPS connection to Harness SaaS — no inbound firewall rules are needed. The agent runs ArgoCD components internally: the Application Controller, Repo Server, and Redis cache. One agent can manage multiple target clusters.
+
+**Pipeline execution flow (PR Pipeline):**
+
+```
+1. Pipeline triggered (with runtime inputs: version, env, service)
+2. Update Release Repo step
+   → Harness writes updated values (e.g. harnessVersion: "1.2.3") to a branch
+   → Creates a PR against main
+3. Merge PR step
+   → Harness auto-merges the PR (if governance allows)
+4. Fetch Linked Apps step
+   → Queries Harness internal registry for ApplicationSets matching
+     harness.io/serviceRef and harness.io/envRef labels
+   → Returns the child Application generated by the ApplicationSet
+5. GitOps Sync step
+   → Triggers ArgoCD sync on the resolved Application
+   → Optionally waits until ArgoCD reports Healthy (with timeout)
+6. Rollback stage (on failure)
+   → Revert GitOps PR step: creates a revert of the harness-release.yaml commit
+   → GitOps Merge PR: merges revert PR to main
+   → GitOps Sync: syncs ArgoCD back to the reverted state
+```
+
+**ApplicationSet requirement:**
+
+Harness GitOps pipelines require ApplicationSets — standalone ArgoCD `Application` resources are not compatible with the `Fetch Linked Apps` step. ApplicationSets must be registered through the Harness GitOps UI (not just committed to Git) because Harness queries its internal registry, not the Git repo. The ApplicationSet template labels (`harness.io/serviceRef`, `harness.io/envRef`) are what wire an ApplicationSet to a Harness Service and Environment.
+
+### 2.2 Best Practices
+
+**Git repository structure:**
+
+- Maintain separate files for Harness-controlled values (`harness-release.yaml`) vs human-controlled values (`values.yaml`, `values-staging.yaml`). This prevents Harness pipeline commits from overwriting hand-crafted configuration and keeps Git history clean.
+- Use a `values.yaml` → `values-<env>.yaml` → `harness-release.yaml` stacking order in ApplicationSet source configuration. Last file wins; Harness always takes highest priority.
+- Keep `harness-release.yaml` in Git with a sensible default (`harnessVersion: "0.0.1"`) so a fresh clone can render the chart without errors.
+
+**Sync governance:**
+
+- Disable ArgoCD automated sync in production. Automated sync lets any push to `main` bypass the Harness pipeline, losing audit trail and approval controls. The recommended model: disable `automated` in `syncPolicy`, enforce branch protection on `main`, and let the pipeline be the only mechanism that merges to `main`.
+- Enable `Wait until healthy` + `Fail if step times out` on the GitOps Sync step. Without this, the pipeline marks a deployment successful as soon as ArgoCD reports "Synced," even if pods are in `CrashLoopBackOff` or `ImagePullBackOff`.
+
+**Rollback configuration:**
+
+The correct rollback stage requires three ordered steps:
+
+```
+Revert GitOps PR  →  GitOps Merge PR  →  GitOps Sync (wait until healthy)
+```
+
+The `Revert GitOps PR` step must reference the commit ID from `Update Release Repo` (not from `Merge PR`):
+
+```
+<+execution.steps.updateReleaseRepo.updateReleaseRepoOutcome.commitId>
+```
+
+Note: the merge commit created by the `Merge PR` step has two parents. The `Revert GitOps PR` step does not support the `-m 1` flag required to revert merge commits. As a workaround, ensure rollback targets the pre-merge commit ID from `updateReleaseRepoOutcome`.
+
+**ApplicationSet configuration:**
+
+- Always set `selfHeal: true` and `prune: true` in `syncPolicy` on ApplicationSets. Self-heal prevents manual `kubectl` edits from persisting. Prune removes orphaned resources when manifests are deleted from Git.
+- Use the List generator for simple per-environment targeting; use Cluster generator for fleet-wide rollouts.
+- Add `harness.io/serviceRef` and `harness.io/envRef` labels exactly matching the Harness Service and Environment identifiers. A mismatch causes `Fetch Linked Apps` to return zero apps and the pipeline fails.
+
+**Scale:**
+
+- One GitOps Agent per cluster is the standard topology. For high-availability or team isolation, deploy multiple agents.
+- Use a shared `staging` Environment (not per-app environments like `helloapistaging`). Shared environments mean new app onboarding only requires a new Service and ApplicationSet, not a new Environment.
+
+### 2.3 Ease of Implementation
+
+**Setup complexity: Medium-High**
+
+Initial setup involves several interdependent steps across both the cluster and Harness:
+
+1. Deploy GitOps Agent to the cluster (Helm install or operator)
+2. Register the cluster in Harness GitOps
+3. Connect the Git repository
+4. Create a Harness Service (with Release Repo and Deployment Repo manifests)
+5. Create an Environment and link it to the cluster via the GitOps Clusters tab
+6. Create an ApplicationSet through the Harness UI (not just in Git)
+7. Create or reuse a pipeline from the template
+
+For each subsequent app, steps 4–7 repeat. Once the ApplicationSet pattern and pipeline template are established, per-app setup is roughly 30–60 minutes of manual work. The Harness Terraform provider can automate this.
+
+**Learning curve: High**
+
+Teams need to understand:
+- ArgoCD concepts (Applications, ApplicationSets, Sync Policies, Health checks)
+- Harness pipeline steps specific to GitOps (Update Release Repo, Fetch Linked Apps, GitOps Sync, Revert GitOps PR)
+- The interaction between Harness-managed state (the pipeline's registry) and Git state
+- Helm values stacking with the `harness-release.yaml` pattern
+
+### 2.4 Pros and Cons
+
+**Pros:**
+
+- **Continuous drift detection** — ArgoCD's reconciliation loop constantly compares desired state (Git) vs actual state (cluster). Out-of-band `kubectl` edits are automatically reverted (with `selfHeal: true`).
+- **Git as single source of truth** — every deployment is a Git commit. Full version history of what was deployed, when, and by whom.
+- **Strong auditability** — every deployment traces back to a specific Git commit, PR, and Harness pipeline execution.
+- **Multi-cluster management** — one Harness account can govern hundreds of clusters via distributed agents, with a single-pane-of-glass dashboard.
+- **ApplicationSet fleet deployments** — define one template, deploy to N clusters/environments simultaneously. Critical for fleet management.
+- **Argo Rollouts integration** — enables progressive delivery (canary, blue/green) via Argo Rollouts CRDs on top of the GitOps model.
+- **Enterprise governance** — OPA policy enforcement, RBAC, deployment freezes, and approval gates all apply to the pipeline that writes to Git.
+- **Cloud-native pattern** — aligns with the CNCF GitOps standard; engineers familiar with ArgoCD can onboard quickly.
+
+**Cons:**
+
+- **No native canary/blue-green** — Harness GitOps (pure sync model) supports rolling updates only. Advanced strategies require Argo Rollouts as an additional dependency.
+- **Setup complexity** — more moving parts than Native Kubernetes or Native Helm: agent deployment, ApplicationSet registration, pipeline wiring.
+- **ApplicationSet must be UI-created** — Harness registers ApplicationSets in its internal system via the UI. Pure GitOps management of ApplicationSet lifecycle is not fully supported; there is a hybrid UI-and-Git setup step.
+- **Revert PR limitations** — `Revert GitOps PR` does not support `-m 1` for merge commits, requiring careful pipeline design around which commit ID to revert.
+- **Scalability ceiling** — users have reported ArgoCD instability beyond ~1,500 applications per agent. Harness has begun offering a "scaled" agent mode to address this.
+- **Agent-per-cluster overhead** — running ArgoCD components inside the target cluster consumes resources and adds operational surface.
+- **Direct push bypass** — if automated sync is left enabled, a direct push to `main` bypasses the Harness pipeline entirely (no approvals, no audit trail in Harness).
+
+### 2.5 Native Harness Integrations and Features
+
+| Feature | Available | Notes |
+|---|---|---|
+| Drift detection | Yes | ArgoCD continuous reconciliation |
+| Self-healing | Yes | `selfHeal: true` in syncPolicy |
+| Rolling deployment | Yes | Default ArgoCD sync |
+| Canary deployment | Via Argo Rollouts | Requires Argo Rollouts CRD and `Rollout` resource type |
+| Blue/Green deployment | Via Argo Rollouts | Same as canary |
+| Harness-managed rollback | Yes | Revert GitOps PR + Sync pipeline stage |
+| Approval gates | Yes | Manual approval steps in pipeline before Merge PR |
+| Deployment freeze | Yes | Account/Org/Project-level freeze windows |
+| OPA policy enforcement | Yes | Applied at pipeline save/run time |
+| Audit trail | Yes | Harness + ArgoCD audit trail; 2-year retention |
+| Multi-cluster dashboard | Yes | Single pane across all clusters |
+| Continuous Verification | Yes | Verify step with APM/logging health source after sync |
+| Pipeline templates | Yes | Full pipeline and stage template support |
+| Terraform provider | Yes | Can provision Services, Environments, ApplicationSets |
+| RBAC | Yes | Granular per-resource permissions |
+| Secrets management | Yes | External secret managers (Vault, AWS SM, etc.) |
+
+---
+
+## 3. Native Helm
+
+### 3.1 How It Works Technically
+
+In Native Helm mode, Harness's Delegate process calls Helm directly. The Delegate:
+
+1. Fetches the Helm chart from the configured chart repository (OCI registry, Helm repo, Git, or S3)
+2. Applies any override values files
+3. Calls `helm upgrade --install <release-name> <chart> -f values.yaml -f overrides.yaml`
+4. After deployment, tracks instances via Helm release state (stored in Kubernetes Secrets in the target namespace)
+
+Helm manages the release lifecycle natively — Harness is essentially a scheduler and trigger for Helm operations. The Delegate needs `helm` CLI and `kubectl` installed alongside it.
+
+**Key behavioral differences vs Native Kubernetes:**
+
+- Helm hooks (`pre-install`, `post-upgrade`, `pre-delete`, etc.) execute as intended — Harness does not interfere with the Helm lifecycle.
+- Subcharts and Helm dependencies resolve correctly.
+- Rollback uses `helm rollback`, not Harness's versioned object tracking.
+- Harness does not use `helm template` followed by `kubectl apply` — the chart is deployed as a Helm release, which means Helm manages the rendered output.
+
+**Deployment flow:**
+
+```
+1. Pipeline triggered
+2. Harness Delegate fetches chart from chart repo
+3. Delegate resolves values files
+4. Delegate runs: helm upgrade --install <release> <chart> [flags]
+5. Helm installs/upgrades all chart resources in the target cluster
+6. Harness tracks deployment via Helm release metadata
+7. On failure: Helm rollback to previous release version
+```
+
+### 3.2 Best Practices
+
+- **Use Native Helm only when Helm-specific features are needed.** If you need Helm hooks, `helm test`, lifecycle management, or want Helm's native rollback behavior (e.g., rolling back to the immediately preceding release rather than the last _successful_ release), Native Helm is appropriate.
+- **Use separate values files per environment** and inject them via the Harness service configuration. Store overrides files alongside your chart in Git.
+- **Keep Helm chart linting in CI** (before the CD pipeline runs). Harness's CD step will fail at install time on chart errors; catching these in CI is faster.
+- **Pin chart versions** in the Harness service manifest configuration. Avoid `*` or `latest` chart version references.
+- **Native Helm Blue/Green and Canary are supported** (Delegate version 84300+ required) but use the same Kubernetes Service selector swap mechanism as the Kubernetes deployment type — Helm is used only to fetch and render the chart. Helm-native features like hooks are still honored. If you need Helm hooks AND progressive delivery, Native Helm is the right choice over the Kubernetes deployment type.
+- **CRD management:** As of 2025, Harness Native Helm supports CRDs even when they exist outside the target namespace, using `helm upgrade --install` to avoid CRD conflicts.
+- **values.yaml is no longer required** — as of a 2025 enhancement, Harness will proceed with a Native Helm deployment even if no `values.yaml` or override file is found at deploy time.
+
+### 3.3 Ease of Implementation
+
+**Setup complexity: Low**
+
+Native Helm is the simplest deployment model to configure:
+
+1. Create a Harness Service, select `NativeHelm` deployment type
+2. Configure the chart source (Helm repo URL, OCI registry, or Git path)
+3. Optionally add values files
+4. Create an Environment and Infrastructure Definition pointing at the target cluster
+5. Create a pipeline with a Deploy stage
+
+This is achievable in minutes. There is no agent to deploy, no ApplicationSet to configure, no PR pipeline to wire.
+
+**Learning curve: Low**
+
+Teams already familiar with Helm need only understand the Harness pipeline model (Service, Environment, Infrastructure Definition, Deploy stage). No GitOps concepts, ArgoCD knowledge, or PR pipeline mechanics required.
+
+### 3.4 Pros and Cons
+
+**Pros:**
+
+- **Full Helm compatibility** — hooks, subcharts, dependencies, `helm test`, and `helm rollback` all work as expected.
+- **Simple setup** — least setup overhead of the three models.
+- **Familiar to Helm-centric teams** — if the team owns Helm charts and thinks in Helm releases, this matches their mental model.
+- **Native Helm rollback** — `helm rollback` is fast and well-understood.
+- **Good for complex charts** — charts with dependencies, subcharts, or sophisticated hook sequences are easier to manage with Native Helm than with Harness's `kubectl apply` approach.
+- **No extra cluster components** — unlike GitOps, no in-cluster agent or ArgoCD controller is needed.
+
+**Cons:**
+
+- **Helm Canary is incompatible with the Harness namespace enforcement feature** — if namespace enforcement is enabled in your account, Helm Canary deployments will fail.
+- **No drift detection** — Harness does not reconcile the cluster state. Out-of-band changes persist silently.
+- **Helm rollback semantics** — Harness uses Helm's rollback, which reverts to the immediately preceding Helm release (not necessarily the last _successful_ deploy). If two bad deployments run back-to-back, the second rollback lands on the first bad version, not the last known good. Native Kubernetes handles this correctly.
+- **Less Harness visibility** — because Harness passes control to Helm for resource management, Harness has less visibility into individual Kubernetes objects (pods, services) compared to the Kubernetes deployment type.
+- **Helm Hooks cannot run with Harness apply logic** — Harness's versioning and tracking features are incompatible with Helm hook semantics. This is why Native Helm is a separate mode.
+- **No ConfigMap/Secret versioning** — Harness Kubernetes deployment type versions ConfigMaps and Secrets, enabling precise rollback. Native Helm does not do this.
+
+### 3.5 Native Harness Integrations and Features
+
+| Feature | Available | Notes |
+|---|---|---|
+| Drift detection | No | Harness does not reconcile between pipelines |
+| Rolling deployment | Yes | Only strategy available |
+| Canary deployment | Yes | Requires Delegate 84300+; incompatible with namespace enforcement |
+| Blue/Green deployment | Yes | Requires Delegate 84300+; uses Kubernetes Service selector swap |
+| Harness-managed rollback | Partial | `helm rollback` used; rolls to previous release, not last-successful |
+| Approval gates | Yes | Manual approval steps in pipeline |
+| Deployment freeze | Yes | Account/Org/Project-level freeze windows |
+| OPA policy enforcement | Yes | Applied at pipeline save/run time |
+| Audit trail | Yes | Harness pipeline audit; 2-year retention |
+| Continuous Verification | Yes | Verify step with APM/logging health source post-deploy |
+| Pipeline templates | Yes | Full pipeline and stage template support |
+| Terraform provider | Yes | Can provision Services, Environments, Infra Definitions |
+| RBAC | Yes | Granular per-resource permissions |
+| Secrets management | Yes | External secret managers (Vault, AWS SM, etc.) |
+| Helm hooks | Yes | Unique advantage over Native Kubernetes type |
+
+---
+
+## 4. Native Kubernetes
+
+### 4.1 How It Works Technically
+
+In the Kubernetes deployment type, Harness takes ownership of Kubernetes resource management. The Delegate fetches manifests (raw YAML or a Helm chart), renders them (using `helm template` if Helm chart), and then deploys using `kubectl apply`. Crucially, Harness wraps this with resource versioning, deployment strategy orchestration, and state tracking — independent of whether the source was a Helm chart or raw manifests.
+
+**Execution flow:**
+
+```
+1. Pipeline triggered
+2. Delegate fetches manifests from Git, Helm repo, OCI registry, or File Store
+3. If Helm chart: Delegate runs `helm template` to render manifests
+4. Harness applies its deployment strategy:
+   - Rolling: kubectl apply all resources
+   - Canary: deploy subset (canary pods), verify, promote
+   - Blue/Green: deploy green service, run verification, swap traffic
+5. Delegate applies rendered manifests via kubectl apply
+6. Harness tracks deployed resources (versioned ConfigMaps/Secrets)
+7. On failure: Harness rolls back to the last versioned successful deployment
+```
+
+**Resource versioning:**
+
+Harness versions Kubernetes ConfigMaps and Secrets during each deployment. If a rollback is needed, Harness replaces current ConfigMaps/Secrets with the last-successful versions and re-applies the previous Deployment manifest. This is more precise than Helm rollback because it tracks the last _successful_ deployment, not merely the previous Helm release.
+
+**The Kubernetes diff step (2025):**
+
+A new `kubectl diff` step was introduced in 2025, allowing pipelines to preview what will change in the cluster before applying. This is useful for change management workflows and governance gates.
+
+**Namespace enforcement:**
+
+As of 2025, Harness enforces strict namespace consistency — pipelines cannot override the Infrastructure Definition-defined namespace using CLI flags. This prevents deployment to wrong namespaces and strengthens governance.
+
+### 4.2 Best Practices
+
+- **Prefer Kubernetes deployment type over Native Helm** unless you specifically need Helm hooks, subcharts, or native Helm release management.
+- **Use canary deployments for critical services.** Harness natively instruments canary deployments: it deploys a percentage of pods, runs Continuous Verification, and promotes or rolls back automatically.
+- **Configure Continuous Verification (CV).** The Verify step integrates with Prometheus, Datadog, AppDynamics, Splunk, Dynatrace, and others. CV runs ML-based anomaly detection against pre-deploy baselines and automatically triggers rollback if regression is detected.
+- **Use blue/green for zero-downtime prod deployments.** Harness manages the service selector swap between blue and green environments. Rollback is instant — just swap selectors back.
+- **Store manifests in Git** and use Harness Git Experience to version-control Service and pipeline configurations. This makes Harness resources themselves auditable and reviewable.
+- **Use the Apply step for dependencies.** The `Kubernetes Apply` step lets you deploy specific manifest subsets (e.g., CRDs, Namespaces) before the main rollout.
+- **Use the Dry Run step in pre-production.** The `kubectl diff` step or the Kubernetes Dry Run step validates manifests against the cluster before actual apply, catching RBAC errors, schema mismatches, and namespace issues early.
+
+### 4.3 Ease of Implementation
+
+**Setup complexity: Low-Medium**
+
+Setup is simpler than GitOps but more configurable than Native Helm:
+
+1. Create a Harness Service, select `Kubernetes` deployment type
+2. Configure manifest source (Git, Helm repo, OCI, File Store)
+3. Create an Environment and Infrastructure Definition (cluster + namespace)
+4. Create a pipeline and choose a deployment strategy (Rolling, Canary, Blue/Green)
+5. Optionally add Verify step for Continuous Verification
+
+No in-cluster agent beyond the standard Harness Delegate is required. No ArgoCD components, ApplicationSets, or PR pipelines.
+
+**Learning curve: Low-Medium**
+
+The Harness Kubernetes deployment type is the most feature-rich but also the most "Harness-native" experience. Teams need to understand Harness's canary and blue/green abstractions, but these are well-documented and the UI guides the setup. Teams do not need to understand ArgoCD, GitOps principles, or Helm release management.
+
+### 4.4 Pros and Cons
+
+**Pros:**
+
+- **Full deployment strategy support** — Rolling, Canary, and Blue/Green are all natively available and first-class.
+- **Harness-managed rollback with versioning** — Harness tracks the last successful deployment and rolls back precisely to it (not just the previous attempt). ConfigMaps and Secrets are versioned.
+- **Continuous Verification** — deep integration with APM and logging tools to automatically detect regressions during canary and rolling deployments.
+- **No extra in-cluster components** — only the Harness Delegate is required (which may already be present for other pipeline steps).
+- **Works with Helm charts** — you can use Helm charts as the manifest source without losing canary/blue-green capability. Harness renders the chart via `helm template` and manages the rest.
+- **Best Harness instrumentation** — the deepest integration with Harness features: drift notification (not continuous reconciliation, but comparison), Kubernetes dry run, diff step, Apply step, and resource status tracking.
+- **OPA policy hooks on manifests** — policies can inspect the rendered Kubernetes manifests before apply.
+
+**Cons:**
+
+- **No drift detection / continuous reconciliation** — once the pipeline completes, Harness does not watch the cluster. Out-of-band changes persist until the next pipeline run.
+- **Helm hooks not supported** — because Harness uses `helm template` + `kubectl apply`, Helm hooks (`pre-install`, `post-upgrade`, `pre-delete`) are bypassed. If your charts rely on hooks, use Native Helm.
+- **Push model** — deployment happens at pipeline execution time. There is no continuous pull reconciliation. If a cluster is in an unknown state between pipelines, Harness won't notice.
+- **Not GitOps** — the cluster state at any point may not be auditable purely from Git. Harness pipeline history is the record of deployments, not Git commits.
+- **Complexity of advanced strategies** — canary and blue/green require correct service, ingress, and selector configuration. The setup is guided by Harness but requires understanding of Kubernetes networking concepts.
+
+### 4.5 Native Harness Integrations and Features
+
+| Feature | Available | Notes |
+|---|---|---|
+| Drift detection | No (notification only) | No continuous reconciliation; manual trigger or CV |
+| Rolling deployment | Yes | Default strategy |
+| Canary deployment | Yes | First-class; with CV integration |
+| Blue/Green deployment | Yes | First-class; instant rollback |
+| Harness-managed rollback | Yes | Versioned; reverts to last _successful_ deploy |
+| Approval gates | Yes | Manual, Jira, ServiceNow approvals |
+| Deployment freeze | Yes | Account/Org/Project-level freeze windows |
+| OPA policy enforcement | Yes | Can inspect rendered manifests |
+| Audit trail | Yes | Pipeline execution audit; 2-year retention |
+| Continuous Verification | Yes | Deepest integration; ML-based anomaly detection |
+| Kubernetes Dry Run | Yes | Validates manifests before apply |
+| Kubernetes Diff step | Yes | Preview changes before apply (2025) |
+| Apply step | Yes | Deploy specific manifests/CRDs separately |
+| Pipeline templates | Yes | Full pipeline and stage template support |
+| Terraform provider | Yes | Can provision all CD entities |
+| RBAC | Yes | Granular per-resource permissions |
+| Secrets management | Yes | External secret managers (Vault, AWS SM, etc.) |
+| Helm hooks | No | Bypassed by `helm template` rendering approach |
+| ConfigMap/Secret versioning | Yes | Unique advantage for precise rollback |
+
+---
+
+## 5. Cross-Cutting Platform Concerns
+
+These features apply across all three deployment models.
+
+### 5.1 Secrets Management
+
+Harness integrates with external secret managers. Secrets are never stored in the Harness database — only a reference is stored.
+
+**Supported secret managers:**
+- HashiCorp Vault (App Role, Kubernetes Service Account, AWS Auth methods)
+- AWS Secrets Manager
+- Azure Key Vault
+- GCP Secrets Manager
+- Custom Secret Manager (shell script-based)
+- Harness Built-in Secret Manager (for non-production use only)
+
+**How secrets are used in pipelines:**
+- Secrets are referenced using Harness expressions: `<+secrets.getValue("my-secret")>`
+- Secret manager selection can be enforced via OPA policy (e.g., "all production secrets must use HashiCorp Vault")
+- Secrets are masked in pipeline logs
+- Harness Delegates communicate with secret managers over the internal network — secrets never traverse the public internet via Harness SaaS
+
+**Kubernetes-specific pattern:**
+For secrets that need to exist in Kubernetes (e.g., pull secrets, app credentials), the standard pattern is:
+1. Store the secret value in Vault or AWS Secrets Manager
+2. Reference it in the Harness pipeline as an environment variable or step variable
+3. Use Harness to create/update a Kubernetes Secret manifest as part of the pipeline, or use the External Secrets Operator alongside Harness
+
+### 5.2 RBAC and Multi-Tenant Governance
+
+Harness RBAC operates at three scopes: **Account**, **Organization**, and **Project**. This maps naturally to a multi-tenant platform model:
+
+```
+Account (entire Harness instance)
+└── Org: platform-team
+    └── Project: team-a (scoped to team A's apps)
+    └── Project: team-b (scoped to team B's apps)
+```
+
+**Key RBAC concepts:**
+
+- **Roles** — define what actions are allowed (Create, Read, Update, Delete, Execute) on which resource types (Pipelines, Services, Environments, Secrets, Connectors)
+- **Resource Groups** — define which specific resources (e.g., only the `production` Environment) the role applies to
+- **User Groups** — assign roles to groups of users; inherit across scope levels
+
+**Platform team governance patterns:**
+
+- Platform team maintains shared resources (Environments, Connectors, Secrets, Pipeline Templates) at Org or Account scope
+- App teams operate at Project scope with no access to shared infrastructure resources
+- OPA policies at Org/Account scope enforce guardrails regardless of project-level permissions
+- Deployment freeze windows at Account/Org scope block all project-level deployments during maintenance windows
+
+**Granular permissions (2025):**
+
+Harness now supports granular permissions for User Groups — you can grant access to specific actions (e.g., Execute pipeline but not Edit) rather than a single broad `Manage` permission.
+
+### 5.3 OPA Policy Enforcement
+
+Harness Policy as Code uses Open Policy Agent (OPA) with the Rego language. Policies can be enforced at:
+
+- **Pipeline save** — prevent saving a pipeline that violates rules (e.g., missing approval step, wrong deployment type)
+- **Pipeline run** — block execution if runtime conditions violate policy
+- **Pipeline step** — enforce rules during execution (e.g., validate a Jira ticket exists before deploying to prod)
+- **Entity creation** — enforce rules when creating Services, Environments, or Connectors
+- **Secrets** — enforce which secret managers can be used
+
+**Example use cases:**
+
+```rego
+# Require approval step before any production deployment
+deny[msg] {
+  input.pipeline.stages[_].stage.spec.infrastructure.environmentRef == "production"
+  not has_approval_step
+  msg := "Production deployments require a manual approval step"
+}
+
+# Require Continuous Verification for canary deployments
+deny[msg] {
+  input.pipeline.stages[_].stage.spec.deploymentType == "Kubernetes"
+  is_canary
+  not has_verify_step
+  msg := "Canary deployments require a Continuous Verification step"
+}
+```
+
+As of 2025, Harness supports AI-assisted OPA policy generation — describe the policy in natural language and Harness generates the Rego.
+
+### 5.4 Audit Trail
+
+All three deployment models benefit from Harness's platform-level audit trail:
+
+- Records who executed what, when, on which resource
+- Captures pipeline execution start/stop, approval decisions, rollback triggers, entity modifications (Service, Environment, Pipeline edits)
+- Stored for 2 years; exportable via audit log streaming for longer retention (SIEM integration)
+- Cannot be altered — immutable record
+- GitOps-specific: when an ArgoCD-managed resource is deleted directly from the cluster, Harness detects the change and records the reconciliation event
+
+For GitOps specifically, Git history provides a second, independent audit trail: every deployment is a merged commit with a PR trail.
+
+### 5.5 Pipeline Templates and Governance at Scale
+
+Harness supports two levels of reusable pipeline templates:
+
+**Pipeline Templates** — the entire pipeline is a template. All apps share identical pipeline structure. Best for standardized workflows.
+
+**Stage Templates** — only the Deploy stage is a template. Each app has its own pipeline but reuses the core deployment logic. Allows per-app customization (extra pre/post steps) while sharing the deployment pattern.
+
+**Versioning model:**
+
+- Templates have explicit versions (`v1`, `v2`) and a `STABLE` floating tag
+- Pipelines pin to a specific version or to `STABLE`
+- To roll out a template change safely: create a new version, test it, then promote it to `STABLE` — all `STABLE`-pinned pipelines update on their next run
+- **Never edit a version in place in production** — this is equivalent to force-pushing to main; all consumers of that version silently change
+
+**Flexible governance with templates (2025 pattern):**
+
+Platform teams can use the "insert blocks" capability to inject mandatory steps (e.g., security scans, CV steps) into any template-derived pipeline. OPA policies then enforce that injected steps meet governance requirements, while app teams retain autonomy over non-governed steps.
+
+Real-world impact: Morningstar reduced from 36,000 pipelines to 50 reusable templates — a 99.8% reduction in managed entities.
+
+### 5.6 Continuous Verification (CV)
+
+The Harness CV (Verify step) is available in all three deployment models and is the primary observability hook for deployment health:
+
+- Integrates with Prometheus, Datadog, AppDynamics, Splunk, Dynatrace, New Relic, Instana, and custom health sources
+- Uses ML-based anomaly detection comparing deployment window metrics against a pre-deployment baseline
+- Works alongside canary deployments to gate promotion (if anomaly detected during canary, rollback is triggered)
+- Service Instance Identifier (SII) identifies which pods are stable baseline vs canary
+- Can be configured for sensitivity (low/medium/high) to control false positive rate
+
+For GitOps deployments, CV runs _after_ the GitOps Sync step, integrating the continuous reconciliation model with post-sync observability.
+
+### 5.7 Deployment Freeze
+
+All three models are subject to Harness deployment freeze windows:
+
+- Configured at Account, Org, or Project scope
+- Can target specific Services, Environments, or all deployments
+- Supports one-time and recurring schedules
+- When a freeze is active, pipeline execution is blocked at the trigger level
+- Override permissions can be granted to specific user groups (e.g., on-call SRE can override a freeze for emergency deployments)
+
+### 5.8 Terraform Provider for Automation
+
+The Harness Terraform provider (`hashicorp/harness`) enables IaC management of all Harness CD entities:
+
+- Services, Environments, Infrastructure Definitions
+- Pipeline Templates, Pipelines
+- ApplicationSets (GitOps)
+- Connectors, Secret Manager configurations
+- RBAC (Roles, Resource Groups, User Group bindings)
+
+This is the recommended path for scaling beyond a handful of apps. The workflow:
+
+```
+Define new app as Terraform module
+    → commit to infra repo
+    → Harness pipeline runs `terraform apply`
+    → Harness Service, Environment, Pipeline created automatically
+```
+
+---
+
+## 6. Comparison Matrix
+
+| Capability | Harness GitOps | Native Helm | Native Kubernetes |
+|---|---|---|---|
+| **Deployment model** | Pull (ArgoCD) | Push (Helm) | Push (kubectl) |
+| **Helm support** | Yes (ArgoCD renders) | Yes (native) | Yes (via `helm template`) |
+| **Raw manifest support** | Yes | No | Yes |
+| **Helm hooks** | No | Yes | No |
+| **Rolling strategy** | Yes (only) | Yes | Yes |
+| **Canary strategy** | Via Argo Rollouts | Yes (Delegate 84300+; incompatible with namespace enforcement) | Yes (native) |
+| **Blue/Green strategy** | Via Argo Rollouts | Yes (Delegate 84300+) | Yes (native) |
+| **Drift detection** | Yes (continuous) | No | No |
+| **Self-healing** | Yes | No | No |
+| **ConfigMap versioning** | No (ArgoCD manages) | No | Yes |
+| **Rollback to last _successful_** | Yes (via revert PR) | No (last release only) | Yes (Harness versioning) |
+| **Harness CV integration** | Yes | Yes | Yes (deepest) |
+| **Approval gates** | Yes | Yes | Yes |
+| **Deployment freeze** | Yes | Yes | Yes |
+| **OPA policy enforcement** | Yes | Yes | Yes |
+| **Audit trail** | Yes (+ Git history) | Yes | Yes |
+| **In-cluster components required** | Yes (GitOps Agent + ArgoCD) | No | No |
+| **Setup complexity** | High | Low | Medium |
+| **Learning curve** | High | Low | Medium |
+| **Fleet/multi-cluster management** | Excellent (ApplicationSets) | Manual | Manual |
+| **GitOps compliance** | Full | No | No |
+| **Terraform provider support** | Yes | Yes | Yes |
+| **Pipeline template support** | Yes | Yes | Yes |
+
+---
+
+## 7. Decision Guide: When to Choose Each Model
+
+### Choose Harness GitOps when:
+
+- **You need drift detection and self-healing.** The cluster state must always match what is in Git, not just at deploy time. Any manual change to the cluster should be automatically corrected.
+- **You are managing multiple clusters (fleet management).** ApplicationSets excel at deploying a single definition across dozens of clusters simultaneously.
+- **GitOps compliance is a requirement.** Regulated industries, SOC2-audited environments, or teams with strict change management requirements benefit from having every deployment traceable to a specific Git commit and PR.
+- **You have or are building a platform team managing many apps.** The ApplicationSet + shared Environment pattern scales to hundreds of apps with consistent governance.
+- **Declarative infrastructure is a first principle.** The team philosophically prefers declarative desired-state over imperative deploy commands.
+- **You already run ArgoCD.** Harness GitOps can be layered on top of an existing ArgoCD installation (Bring Your Own Argo CD feature).
+
+**Avoid if:** You need canary or blue/green without adding Argo Rollouts complexity, or if the team is not ready to commit to Git as the exclusive deployment path (no direct `kubectl apply` in production).
+
+### Choose Native Helm when:
+
+- **Your chart uses Helm hooks** that are essential to the deployment lifecycle (e.g., database migrations in `pre-upgrade` hooks, test execution in `test` hooks).
+- **You have complex chart dependencies** — subcharts, library charts, or `helm dependency update` workflows.
+- **The team thinks in Helm releases** and wants `helm rollback`, `helm history`, and `helm status` to work as expected.
+- **You want the simplest Harness setup** — minimum configuration, no agents, no GitOps concepts.
+- **You are migrating from a pure Helm-based CD system** and want a low-risk transition.
+
+**Avoid if:** You need Harness-managed rollback to the last _successful_ deployment (Helm rollback goes to the previous release, not necessarily the last successful one), or if namespace enforcement is enabled and you need Canary.
+
+### Choose Native Kubernetes when:
+
+- **You need canary or blue/green deployments without Helm hooks.** Native Kubernetes is the cleanest path — all three strategies are first-class with no version constraints. Native Helm also supports them now (Delegate 84300+) but with caveats around namespace enforcement and rollback semantics.
+- **You want deep Continuous Verification integration.** CV is most powerful in canary deployments where Harness controls the traffic split and can auto-rollback based on metric regressions.
+- **You want Harness to version ConfigMaps and Secrets** for precise rollback behavior.
+- **You use Helm charts but don't rely on hooks** — you get the organizational benefits of Helm chart structure plus Harness's full deployment strategy and rollback capabilities.
+- **You want zero-downtime production deployments** without the overhead of the GitOps model.
+- **You want the deepest Harness feature integration** (dry run, diff step, Apply step, CV, versioned rollback) in a push-based model.
+
+**Avoid if:** Your charts rely on Helm hooks, or you need continuous drift detection between deployments.
+
+### Hybrid patterns (valid in practice):
+
+- **GitOps for infrastructure, Native Kubernetes for application services** — use GitOps to manage cluster-level resources (namespaces, RBAC, operators) and Native Kubernetes CD for application deployments with canary.
+- **Native Kubernetes in lower environments, GitOps in production** — fast iteration with push-based deploys in dev/staging; GitOps governance in production.
+- **Native Helm for legacy charts, GitOps for greenfield services** — incrementally migrate without refactoring existing Helm charts.
+
+---
+
+## 8. Known Limitations and Gotchas
+
+### Harness GitOps
+
+| Issue | Description | Workaround |
+|---|---|---|
+| ApplicationSet must be UI-created | `Fetch Linked Apps` queries Harness internal registry, not Git. A file in Git alone is insufficient. | Always create ApplicationSets through the Harness GitOps UI. Use `applicationset.yaml` as documentation only. |
+| Revert GitOps PR fails on merge commits | `Revert GitOps PR` does not pass `-m 1` for merge commits. Fails with `MultipleParentsNotAllowedException`. | Reference the pre-merge commit ID from `updateReleaseRepoOutcome.commitId`, not from `Merge PR`. Do not use squash-only branch protection (breaks `Merge PR` step with `405: Merge commits are not allowed`). |
+| Automated sync bypasses pipeline | If ArgoCD `automated` sync is enabled, direct pushes to `main` deploy without pipeline governance. | Disable automated sync in production ApplicationSets. Enforce branch protection on `main`. |
+| GitOps Sync dynamic resolution issues | Leaving Application Name blank in GitOps Sync step can cause `SocketTimeoutException` if ArgoCD is unstable. | Tune ArgoCD performance settings. The blank-name dynamic resolution is the correct pattern after `Fetch Linked Apps`; the error indicates ArgoCD health issues, not a Harness bug. |
+| ApplicationSet scalability ~1,500 apps | ArgoCD instability reported beyond ~1,500 applications per agent. | Use Harness's "scaled" agent mode (available on request). Distribute across multiple agents. |
+| Project-scoped repo authentication | ApplicationSet-generated Applications may fail to authenticate to project-scoped repos due to ArgoCD 2.12 changes. | Use Org or Account-scoped repositories instead of Project-scoped. |
+| ApplicationSet CRD size limit | ApplicationSet CRD exceeds Kubernetes client-side apply size limit on upgrade. | Use Server-Side Apply (`--server-side`) for ApplicationSet CRD upgrades. |
+| Fine-grained GitOps RBAC | GitOps-specific RBAC controls are less granular than pipeline/service RBAC. | Track Harness roadmap; enhancement requests have been filed. |
+| Canary/Blue-Green unavailable natively | The ArgoCD sync model is rolling only. | Add Argo Rollouts to the cluster and use `Rollout` resource type. Requires additional operational knowledge. |
+
+### Native Helm
+
+| Issue | Description | Workaround |
+|---|---|---|
+| Canary incompatible with namespace enforcement | Helm Canary deployments fail when Harness namespace enforcement is enabled on your account. | Disable namespace enforcement, or use Native Kubernetes deployment type instead. |
+| Rollback goes to previous release, not last successful | If two bad deploys run, `helm rollback` lands on the first bad version. | Use Native Kubernetes deployment type for correct rollback-to-last-successful behavior. |
+| Helm state in cluster Secrets | Helm stores release state in Kubernetes Secrets. Deleting those secrets orphans the release. | Never delete Helm release Secrets manually. |
+| No per-resource Harness tracking | Harness cannot report on individual pod/deployment status as clearly as with the Kubernetes deployment type. | Accept reduced visibility, or migrate to Kubernetes deployment type. |
+
+### Native Kubernetes
+
+| Issue | Description | Workaround |
+|---|---|---|
+| Helm hooks bypassed | `helm template` strips hooks before `kubectl apply`. Hook-reliant lifecycle steps are silently skipped. | Use Native Helm if hooks are essential. Consider pre/post-deploy Shell Script steps in Harness as hook replacements. |
+| No drift detection | Cluster state diverges from desired state after out-of-band changes without notification. | Supplement with Kubernetes audit logs or a separate drift notification tool. Consider GitOps for environments where drift is unacceptable. |
+| Complex canary/blue-green networking | Canary and blue/green require correct Kubernetes Service and Ingress configuration. Misconfiguration leads to unintended traffic routing. | Follow Harness documentation precisely. Test in non-production environments with traffic validation before enabling in production. |
+| Namespace override blocked (2025) | Harness now enforces the Infrastructure Definition namespace and rejects `--namespace` overrides. | Define the correct namespace in the Infrastructure Definition. |
+
+---
+
+## References and Sources
+
+- [Harness GitOps Basics — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/get-started/harness-git-ops-basics/)
+- [Harness GitOps Agent Architecture — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/get-started/gitops-architecture/)
+- [Deploy Native Helm using Harness — Developer Hub](https://developer.harness.io/docs/continuous-delivery/deploy-srv-diff-platforms/helm/native-helm-quickstart/)
+- [Helm Deployments Overview — Developer Hub](https://developer.harness.io/docs/continuous-delivery/deploy-srv-diff-platforms/helm/helm-cd-quickstart/)
+- [Helm Deployment FAQs — Developer Hub](https://developer.harness.io/docs/continuous-delivery/deploy-srv-diff-platforms/helm/helm-deployment-faqs/)
+- [Kubernetes Deployments Overview — Developer Hub](https://developer.harness.io/docs/continuous-delivery/deploy-srv-diff-platforms/kubernetes/kubernetes-deployments-overview/)
+- [Kubernetes Deployment FAQs — Developer Hub](https://developer.harness.io/docs/continuous-delivery/deploy-srv-diff-platforms/kubernetes/kubernetes-faqs/)
+- [Create a Kubernetes Blue Green Deployment — Developer Hub](https://developer.harness.io/docs/continuous-delivery/deploy-srv-diff-platforms/kubernetes/kubernetes-executions/create-a-kubernetes-blue-green-deployment/)
+- [Harness GitOps Pipeline Steps — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/pr-pipelines/gitops-pipeline-steps/)
+- [Manage Environment Changes with PR Pipelines — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/pr-pipelines/)
+- [ApplicationSet Basics — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/applicationsets/appset-basics/)
+- [Argo Rollouts Overview — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/argo-rollouts/argo-rollouts-overview/)
+- [Harness GitOps vs Argo CD — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/get-started/harness-gitops-vs-argocd/)
+- [OPA Policies for CD Entities — Developer Hub](https://developer.harness.io/docs/continuous-delivery/x-platform-cd-features/advanced/cd-governance/opa-policies-for-cd-entities/)
+- [RBAC in Harness — Developer Hub](https://developer.harness.io/docs/platform/role-based-access-control/rbac-in-harness/)
+- [Harness Policy as Code Overview — Developer Hub](https://developer.harness.io/docs/platform/governance/policy-as-code/harness-governance-overview/)
+- [Harness Secrets Management Overview — Developer Hub](https://developer.harness.io/docs/platform/secrets/secrets-management/harness-secret-manager-overview/)
+- [Add HashiCorp Vault Secret Manager — Developer Hub](https://developer.harness.io/docs/platform/secrets/secrets-management/add-hashicorp-vault/)
+- [Freeze Deployments — Developer Hub](https://developer.harness.io/docs/continuous-delivery/manage-deployments/deployment-freeze/)
+- [Harness Continuous Verification Overview — Developer Hub](https://developer.harness.io/docs/continuous-delivery/verify/verify-deployments-with-the-verify-step/)
+- [Audit Trail for GitOps — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/security/audit-trail/)
+- [View Audit Trail — Developer Hub](https://developer.harness.io/docs/platform/governance/audit-trail/)
+- [Best Practices and Guidelines for Templates — Developer Hub](https://developer.harness.io/docs/platform/templates/templates-best-practices/)
+- [Stop Pipeline Sprawl: Flexible Template Governance — Harness Blog](https://www.harness.io/blog/flexible-governance-solving-the-all-or-nothing-problem-in-pipeline-templates)
+- [Overcoming GitOps Scaling Challenges with Harness — Harness Blog](https://www.harness.io/blog/overcoming-gitops-scaling-challenges-with-harness)
+- [Automate Onboarding with Harness Terraform Provider — Developer Hub](https://developer.harness.io/docs/platform/automation/terraform/automate-harness-onboarding/)
+- [Migrate Helm Deployment from CD Pipeline to GitOps — Developer Hub](https://developer.harness.io/kb/continuous-delivery/articles/migrating-helm-deployment-from-cd-to-gitops/)
+- [Q1 2025 Product Update — Harness Blog](https://www.harness.io/blog/q1-2025-product-update-all-the-latest-features-delivered-by-harness)
+- [Harness Kubernetes: Quick Tutorial, Pros and Cons — Codefresh](https://codefresh.io/learn/harness-io/harness-kubernetes-quick-tutorial-pros-and-cons/)
+- [Harness GitOps: The Basics and a Quick Tutorial — Codefresh](https://codefresh.io/learn/harness-io/harness-gitops/)
+- [GitOps FAQs — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/gitops-faqs/)
+- [Troubleshooting Harness GitOps — Developer Hub](https://developer.harness.io/docs/continuous-delivery/gitops/resources/troubleshooting/)

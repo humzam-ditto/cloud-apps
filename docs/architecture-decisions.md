@@ -130,3 +130,161 @@ Overwriting a version in place is the equivalent of force-pushing to main — it
 **Current state**
 
 `v1` was edited in place during POC, which required manual reconciliation on all pipelines. Before going to prod, establish the convention of always creating new versions rather than editing existing ones.
+
+---
+
+## 6. Pipeline Rollback: When does it actually trigger?
+
+**Background**
+
+Harness GitOps deploy stages have a built-in rollback that reverts `harness-release.yaml` to the previous values and re-syncs ArgoCD. However, rollback only triggers when a **pipeline step fails** — not when a deployment results in unhealthy pods.
+
+**What the current pipeline catches**
+
+Rollback fires if a pipeline step throws an error:
+- `Update Release Repo` fails (bad credentials, repo unreachable)
+- `Merge PR` fails (merge conflict, branch protection block)
+- `Fetch Linked Apps` fails (ApplicationSet not found, agent unreachable)
+- `ArgoCD Sync` fails (invalid manifest YAML, CRD missing)
+
+**What the current pipeline does NOT catch**
+
+Failures that happen asynchronously after ArgoCD reports "Synced":
+- Bad image tag → `ImagePullBackOff`
+- App crash on startup → `CrashLoopBackOff`
+- Readiness probe failing → pod never becomes Ready
+- Misconfigured env vars, OOM kills, wrong config values
+
+In these cases, all pipeline steps return green and Harness marks the deployment successful — even though the app is degraded.
+
+**The fix: GitOps Sync step with "Wait until healthy"**
+
+The `GitOps Sync` step (added after `Fetch Linked Apps`) has a **"Wait until healthy"** + **"Fail If Step Times Out"** option. When enabled, Harness polls the ArgoCD app health after sync and fails the step if the app does not reach `Healthy` within the timeout. This closes the loop:
+
+```
+GitOps Sync (Wait until healthy)
+    ↓ healthy              ↓ unhealthy/timeout
+Pipeline succeeds     Pipeline fails → Rollback stage runs
+                                      → reverts harness-release.yaml
+                                      → re-syncs to last good state
+```
+
+**Known limitation: GitOps Sync dynamic app targeting**
+
+The `GitOps Sync` step initially had issues resolving apps dynamically — leaving the Application Name empty caused a fast `SocketTimeoutException` (~46s). This turned out to be an ArgoCD refresh instability issue in the cluster, not a Harness bug. After an ArgoCD tuning PR, dynamic resolution via `Fetch Linked Apps` output works correctly — leaving Application Name empty is fine and the step automatically targets the correct app.
+
+**Known limitation: Rollback via GitOps Revert PR does not work with merge commits**
+
+The rollback stage uses `Revert GitOps PR` to undo the `harness-release.yaml` change. This fails with:
+
+```
+MultipleParentsNotAllowedException: Cannot revert commit because it has 2 parents
+```
+
+The `Merge PR` step creates a **merge commit** (2 parents). `git revert` on a merge commit requires specifying a parent (`-m 1`), which the `Revert GitOps PR` step does not support.
+
+Attempted workaround: disable merge commits on the GitHub repo to force squash merges. This broke the `Merge PR` step entirely (`405: Merge commits are not allowed`), confirming the step hardcodes regular merge strategy.
+
+**Correct rollback flow**
+
+The full rollback section requires three steps:
+
+```
+Revert GitOps PR   →   GitOps Merge PR   →   GitOps Sync
+(creates revert PR)    (merges it to main)    (syncs ArgoCD to reverted state)
+```
+
+- `Revert GitOps PR` uses the commit ID from `Update Release Repo` (not `Merge PR`) — expression: `<+execution.steps.updateReleaseRepo.updateReleaseRepoOutcome.commitId>`
+- `GitOps Merge PR` merges the revert PR to main
+- `GitOps Sync` re-syncs ArgoCD to pick up the reverted `harness-release.yaml`
+
+**Current state**
+
+All three rollback steps are configured and validated end-to-end. A bad image tag (`bad-tag`) correctly triggers the full rollback flow — the revert PR is created, merged, and ArgoCD returns to a healthy state automatically.
+
+**Recommendation**
+
+Ensure the rollback `GitOps Sync` step also has `Wait until healthy` enabled so the rollback itself is verified before the pipeline marks the rollback as complete.
+
+---
+
+## 7. Service and Environment Modeling: Scope and granularity
+
+**Background**
+
+In Harness, a **Service** represents what you're deploying (the application) and an **Environment** represents where you're deploying (the infrastructure target). How you define these has downstream effects on ApplicationSet labels, pipeline reuse, and onboarding complexity.
+
+**Best practices**
+
+- **One Service per application** — `hello-web`, `hello-api`, etc. Never create per-environment variants of a service.
+- **One Environment per deployment target, shared across apps** — `staging` is a single environment used by all apps deploying there. It is not app-specific.
+- The combination of Service × Environment defines a unique deployment target. The ApplicationSet labels wire this:
+  ```yaml
+  harness.io/serviceRef: helloapiservice   # identifies the Service
+  harness.io/envRef: staging               # identifies the Environment
+  ```
+
+**Current state and issue**
+
+The POC was set up with app-specific environment IDs (`hellowebstaging`, `helloapistaging`). This is an anti-pattern — it means every new app requires a new Environment to be created in Harness, which doesn't scale.
+
+**Recommendation**
+
+Consolidate to a single `staging` environment (and later `prod`) shared across all apps before scaling beyond the current 2 apps. When paired with automated onboarding (see item 3), adding a new app should only require:
+1. Creating a new Service in Harness
+2. Creating an ApplicationSet that references the existing shared Environment
+3. No new Environment needed
+
+**Impact on existing setup**
+
+Refactoring requires updating the `harness.io/envRef` labels in both ApplicationSets and re-registering them in the Harness GitOps UI. Low effort now, high effort after scaling.
+
+---
+
+## 8. Deployment Model: GitOps vs Native Kubernetes (Hybrid)
+
+**Background**
+
+Harness supports multiple deployment models. This repo uses Harness GitOps (ArgoCD-based) as its primary model. However, not all workload types are a good fit for GitOps — specifically, ephemeral workloads on dynamically created clusters.
+
+**Decision: Hybrid model**
+
+Use the right deployment model per workload type:
+
+| Workload type | Model | Rationale |
+|---|---|---|
+| Long-lived environments (dev, staging, prod) | Harness GitOps | Drift detection, audit trail, fleet management via ApplicationSets |
+| Ephemeral clusters (preview environments, load test clusters, CI integration) | Native Kubernetes | No per-cluster agent overhead; Delegate connects dynamically via kubeconfig |
+
+Both models are supported within the same Harness account/org/project. This is not an either/or architectural commitment.
+
+**Why GitOps is a poor fit for ephemeral clusters**
+
+Every GitOps cluster requires bootstrapping the GitOps Agent (ArgoCD components) onto the cluster, registering the cluster in Harness, and registering ApplicationSets through the Harness UI (or Terraform). For a short-lived cluster, this overhead is pure waste — it gets torn down before the investment pays off. The agent also consumes cluster resources (ArgoCD controller, repo server, Redis) that add no value for temporary workloads.
+
+**How Native Kubernetes handles ephemeral clusters**
+
+The Harness Delegate does not live inside the target cluster — it connects to the Kubernetes API server using credentials (kubeconfig, service account token, IAM role). A single existing Delegate in the same VPC/region can reach any new cluster's API endpoint without additional networking setup.
+
+For fully automated ephemeral cluster lifecycles, the pipeline owns the full flow:
+
+```
+Terraform/script provisions cluster
+    → cluster endpoint + credentials output as pipeline variables
+    → Harness Delegate uses those credentials to deploy
+    → (optional) teardown stage destroys cluster after use
+```
+
+Infrastructure Definition cluster endpoint and namespace can be marked as runtime inputs, or a provisioner step earlier in the pipeline can output the values and pass them downstream.
+
+**Deployment strategy support**
+
+Native Kubernetes supports Rolling, Canary, and Blue/Green natively — no additional cluster components required. If ephemeral workloads need progressive delivery (e.g. load-testing a canary before promoting), this is available without adding Argo Rollouts.
+
+**What remains GitOps-only**
+
+Drift detection and self-healing are not available in Native Kubernetes. For long-lived environments where cluster state integrity matters, GitOps remains the correct model. Ephemeral clusters do not need drift detection — they are destroyed rather than corrected.
+
+**Current state**
+
+Not yet implemented. GitOps is the only active deployment model. Native Kubernetes pipeline support should be built when the first ephemeral workload use case is identified.
