@@ -325,12 +325,43 @@ In the Kubernetes deployment type, Harness takes ownership of Kubernetes resourc
 3. If Helm chart: Delegate runs `helm template` to render manifests
 4. Harness applies its deployment strategy:
    - Rolling: kubectl apply all resources
-   - Canary: deploy subset (canary pods), verify, promote
-   - Blue/Green: deploy green service, run verification, swap traffic
+   - Canary: deploy separate canary Deployment, verify, promote via rolling update
+   - Blue/Green: deploy stage Deployment, verify, swap Service selector
 5. Delegate applies rendered manifests via kubectl apply
 6. Harness tracks deployed resources (versioned ConfigMaps/Secrets)
 7. On failure: Harness rolls back to the last versioned successful deployment
 ```
+
+**Canary mechanics — what Harness actually does in Kubernetes:**
+
+Harness canary is not a true traffic-weighted canary by default. It is a staged deployment with approximate traffic splitting via pod count ratio. Understanding the actual Kubernetes objects involved is important:
+
+1. **A separate `<name>-canary` Deployment is created** alongside the original stable Deployment. The original is left completely untouched — it continues running at full replica count with the old image.
+2. **Pod labeling** — Harness adds `harness.io/track: canary` to the canary Deployment's selector and pod template labels, and `harness.io/track: stable` to the original. This makes the two Deployments manage completely separate, non-overlapping pod sets.
+3. **Shared Service** — no separate canary Service is created by default. Both pod sets share the same existing Kubernetes Service. Traffic is round-robined across all pods from both Deployments. The traffic split is determined purely by relative replica counts (e.g. 1 canary pod + 9 stable pods ≈ 10% canary traffic). This is approximate, not precise.
+4. **Promote = delete canary + rolling update** — when verification passes, Harness deletes the `<name>-canary` Deployment, then does a standard `kubectl apply` + `kubectl rollout status` on the original stable Deployment with the new image. The canary Deployment is discarded; the production Deployment gets updated via a rolling update.
+
+```
+Phase 1: Canary
+  my-nginx          (Deployment, stable, full replicas, old image) ──┐
+  my-nginx-canary   (Deployment, canary, N replicas, new image)  ───┤──▶ shared Service
+                                                                      └── traffic split by pod count ratio
+
+Phase 2: Promote
+  delete my-nginx-canary
+  kubectl apply my-nginx (new image) → Kubernetes rolling update
+```
+
+**Immutable selector caveat:** Because `spec.selector` is immutable in Kubernetes, if a Deployment was created *outside* of Harness (without the `harness.io/track: stable` label in its selector), Harness will fail trying to add it. The workaround is enabling "Disable addition of Harness track selector" at the project level — Harness then skips adding the label to the selector (but still adds it to pod template labels).
+
+**True traffic-weighted canary:** For precise percentage-based traffic control independent of replica count, add the optional **Traffic Routing step** with Istio (`VirtualService`) or SMI (`TrafficSplit`). This is not enabled by default and requires a service mesh in the cluster.
+
+**CV effectiveness caveat:** Harness CV during the canary phase analyses telemetry from the canary pods against a stable baseline. However, with low replica counts (e.g. 1 canary pod), traffic volume to the canary may be too low to produce statistically meaningful signal in your APM tool. CV is most effective when:
+- Enough replicas exist that the canary pod(s) receive meaningful traffic volume
+- Or the optional Traffic Routing step provides explicit weighted routing (ensuring a defined percentage of real traffic hits the canary regardless of pod count)
+- Or synthetic load generation is run against the canary pods before the CV step
+
+Without sufficient traffic, CV degrades to a smoke test (log anomaly detection, infrastructure metrics like CPU/memory/restarts) rather than true production signal analysis.
 
 **Resource versioning:**
 
@@ -347,7 +378,7 @@ As of 2025, Harness enforces strict namespace consistency — pipelines cannot o
 ### 4.2 Best Practices
 
 - **Prefer Kubernetes deployment type over Native Helm** unless you specifically need Helm hooks, subcharts, or native Helm release management.
-- **Use canary deployments for critical services.** Harness natively instruments canary deployments: it deploys a percentage of pods, runs Continuous Verification, and promotes or rolls back automatically.
+- **Understand what Harness "canary" actually is.** Harness canary deploys a separate `<name>-canary` Deployment alongside the stable one and splits traffic by pod count ratio via the shared Service — not by explicit traffic weighting. For precise traffic control (e.g. exactly 10% regardless of replica count), add the Traffic Routing step with Istio or SMI. For services with very few replicas, the pod-count split may not give canary pods enough traffic for CV to produce meaningful signal.
 - **Configure Continuous Verification (CV).** The Verify step integrates with Prometheus, Datadog, AppDynamics, Splunk, Dynatrace, and others. CV runs ML-based anomaly detection against pre-deploy baselines and automatically triggers rollback if regression is detected.
 - **Use blue/green for zero-downtime prod deployments.** Harness manages the service selector swap between blue and green environments. Rollback is instant — just swap selectors back.
 - **Store manifests in Git** and use Harness Git Experience to version-control Service and pipeline configurations. This makes Harness resources themselves auditable and reviewable.
@@ -398,7 +429,7 @@ The Harness Kubernetes deployment type is the most feature-rich but also the mos
 |---|---|---|
 | Drift detection | No (notification only) | No continuous reconciliation; manual trigger or CV |
 | Rolling deployment | Yes | Default strategy |
-| Canary deployment | Yes | First-class; with CV integration |
+| Canary deployment | Yes | Separate canary Deployment + shared Service; traffic split by pod ratio (not weighted). True weighted canary requires Traffic Routing step + Istio/SMI |
 | Blue/Green deployment | Yes | First-class; instant rollback |
 | Harness-managed rollback | Yes | Versioned; reverts to last _successful_ deploy |
 | Approval gates | Yes | Manual, Jira, ServiceNow approvals |
@@ -637,7 +668,7 @@ Define new app as Terraform module
 ### Choose Native Kubernetes when:
 
 - **You need canary or blue/green deployments without Helm hooks.** Native Kubernetes is the cleanest path — all three strategies are first-class with no version constraints. Native Helm also supports them now (Delegate 84300+) but with caveats around namespace enforcement and rollback semantics.
-- **You want deep Continuous Verification integration.** CV is most powerful in canary deployments where Harness controls the traffic split and can auto-rollback based on metric regressions.
+- **You want Continuous Verification integration.** CV works with Native Kubernetes canary, but effectiveness depends on traffic volume to canary pods. For true production signal analysis, pair with the Traffic Routing step (Istio/SMI) or synthetic load generation to ensure canary pods receive meaningful traffic before CV runs.
 - **You want Harness to version ConfigMaps and Secrets** for precise rollback behavior.
 - **You use Helm charts but don't rely on hooks** — you get the organizational benefits of Helm chart structure plus Harness's full deployment strategy and rollback capabilities.
 - **You want zero-downtime production deployments** without the overhead of the GitOps model.
