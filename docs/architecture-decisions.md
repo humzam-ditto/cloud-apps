@@ -47,29 +47,33 @@ Every app that needs pipeline-managed deployments must have:
 
 ---
 
-## 3. New App Onboarding: Manual UI setup vs automated provisioning
+## 3. Harness Resource Management: IaC strategy
 
-**The problem**
+**Decision made**
 
-Currently, onboarding a new app requires several manual steps in the Harness UI: creating the ApplicationSet, Service, Environment, and Pipeline. This doesn't scale and is error-prone as the number of apps grows.
+Manage Harness resources using a split IaC strategy that mirrors how the team already operates:
 
-**What needs to be decided**
+| Layer | Tool | Resources |
+|---|---|---|
+| Infrastructure | Terraform (Harness provider) | Secrets, GitOps Agents, Delegates, connectors, RBAC, secret manager config |
+| Application delivery | Harness Git Experience (YAML) | Services, Environments, Infrastructure Definitions, Pipelines, Pipeline Templates |
 
-How should new apps be provisioned? Options:
+**Rationale**
 
-- **Manual UI** — what we do today. Works for a small number of apps but doesn't scale and has no audit trail for the Harness-side config.
-- **Harness Terraform provider** — define all Harness resources (Services, Environments, ApplicationSets, Pipelines) as Terraform. A new app is added by writing a Terraform module and running `terraform apply`. Auditable, repeatable, and codified.
-- **Harness API** — programmatically create Harness resources via the REST API, potentially triggered by a self-service workflow or a script in this repo.
+The team already uses Terraform to provision infrastructure-layer resources (secrets, agents, delegates). Continuing that pattern for the equivalent Harness infrastructure resources is consistent and avoids introducing a second tool for the same concern.
+
+Harness Git Experience provides bidirectional sync between Git and the Harness UI for app-layer resources — changes in the UI push back to Git automatically, and changes in Git are reflected in Harness. This is the natural fit for resources that change frequently (pipelines, services, environments) and benefit from PR-based review without requiring a Terraform state backend.
+
+**What goes where**
+
+Terraform owns resources that are set up once and rarely change — the infrastructure plumbing of Harness itself. Git Experience YAML owns resources that application teams interact with day-to-day.
+
+**Harness Git Experience YAML** files are stored in Git alongside (or near) the Helm charts they describe. Each Service, Environment, and Pipeline is a YAML file versioned in the repo. The Harness UI and Git stay in sync automatically.
 
 **Open questions**
 
-- Should Harness resource definitions (Services, Environments, Pipelines) live in this repo alongside the Helm charts, or in a separate infra repo?
-- Can the Pipeline Template (`gitops-deploy-stage`) be provisioned via Terraform/API so it doesn't need to be manually created per project?
-- How do we handle the Harness UI-created ApplicationSet being the source of truth today — can that be fully replaced by Terraform so git is the only source of truth?
-
-**Recommendation**
-
-Invest in the Harness Terraform provider before scaling beyond a handful of apps. The manual UI approach will become a bottleneck quickly. This should be explored as part of designing the automated app onboarding workflow.
+- Should Harness YAML resource definitions live in this repo alongside the Helm charts, or in a separate platform repo?
+- Can the Pipeline Template (`gitops-deploy-stage`) be managed as a Git Experience YAML so it doesn't need to be manually created per project?
 
 ---
 
