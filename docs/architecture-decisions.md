@@ -6,23 +6,28 @@ A running list of design areas the team needs to align on before moving to produ
 
 ## 1. GitOps Sync Governance: Who can trigger a deployment?
 
-**The tension**
+**Decision made**
 
-ArgoCD automated sync watches the repo and syncs any change pushed to `main` immediately — bypassing the Harness pipeline entirely. This means a direct push to `main` deploys to the cluster with no audit trail in Harness, no approvals, and no pipeline controls.
+Auto-sync is OFF across all environments. Harness is the sole deployment orchestrator. ArgoCD is the sync engine only — it does not decide when to sync.
 
-**Options**
+**How it works**
 
-- **Automated sync only** — any push to `main` deploys automatically. Simple but no governance. Fine for dev, risky for prod.
-- **Pipeline only, automated sync disabled** — ArgoCD only syncs when Harness explicitly triggers it. The pipeline is the sole deployment path. Requires discipline to not push directly.
-- **Pipeline only, enforced** — disable automated sync on the ApplicationSet + branch protection on `main` so only Harness PRs can merge. The pipeline is the enforced front door, no back door exists.
+Harness is triggered by merges to the GitOps repo and calls the ArgoCD sync API as a pipeline step. This gives a single control plane for approvals, deployment windows, and audit trail. Self-heal is disabled everywhere since it requires auto-sync to be on.
 
-**Recommendation for prod**
+**Drift detection (tiered by environment)**
 
-Option 3 — disable automated sync and enforce branch protection on `main`. This ensures every deployment is traceable to a Harness pipeline execution.
+| Environment | Approach |
+|---|---|
+| Non-prod | Nightly Harness pipeline syncs ArgoCD on a schedule — keeps environments fresh without manual intervention |
+| Prod | ArgoCD notifications alert on OutOfSync state; no auto-remediation — a human decides whether drift is a legitimate emergency workaround or needs to be reverted |
+
+**Break-glass in prod**
+
+Manual ArgoCD syncs in prod are permitted for on-call SREs only, enforced via ArgoCD RBAC. This covers emergency situations where waiting for a full Harness pipeline run is not viable.
 
 **Current state**
 
-Automated sync is enabled. Direct pushes to `main` will trigger ArgoCD syncs bypassing the pipeline. Acceptable for POC, needs to be addressed before prod.
+Not yet implemented. Auto-sync is still enabled in the POC. Disabling auto-sync and configuring ArgoCD notifications for prod is a Phase 1 priority.
 
 ---
 
