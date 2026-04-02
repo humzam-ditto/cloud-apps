@@ -275,13 +275,13 @@ Every GitOps cluster requires bootstrapping the GitOps Agent (ArgoCD components)
 
 The Harness Delegate does not live inside the target cluster — it connects to the Kubernetes API server using credentials (kubeconfig, service account token, IAM role). A single existing Delegate in the same VPC/region can reach any new cluster's API endpoint without additional networking setup.
 
-For fully automated ephemeral cluster lifecycles, the pipeline owns the full flow:
+Ephemeral clusters are provisioned by **Valet with a TTL configured** — the cluster is automatically destroyed when the TTL expires, removing the need for an explicit teardown step. The Harness pipeline flow is:
 
 ```
-Terraform/script provisions cluster
+Valet provisions ephemeral cluster (TTL set)
     → cluster endpoint + credentials output as pipeline variables
     → Harness Delegate uses those credentials to deploy
-    → (optional) teardown stage destroys cluster after use
+    → Valet TTL expires → cluster auto-destroyed
 ```
 
 Infrastructure Definition cluster endpoint and namespace can be marked as runtime inputs, or a provisioner step earlier in the pipeline can output the values and pass them downstream.
