@@ -1,0 +1,39 @@
+replicaCount: 1
+
+image:
+  repository: small-peer-log-parser
+  tag: "latest"
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 128Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+probes:
+  liveness:
+    enabled: false
+    httpGet:
+      path: /
+    initialDelaySeconds: 10
+  readiness:
+    enabled: false
+    httpGet:
+      path: /
+    initialDelaySeconds: 5
+
+configMap:
+  enabled: false
+  mountPath: ""
+
+env: []
+podAnnotations: {}
+harnessVersion: "0.0.1"
+imageTag: ""
