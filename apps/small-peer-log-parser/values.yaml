@@ -1,9 +1,9 @@
 replicaCount: 1
 
 image:
-  repository: small-peer-log-parser
-  tag: "latest"
-  pullPolicy: IfNotPresent
+  repository: quay.io/ditto/internal-tooling
+  tag: small-peer-log-parser-latest
+  pullPolicy: Always  
 
 service:
   type: ClusterIP
