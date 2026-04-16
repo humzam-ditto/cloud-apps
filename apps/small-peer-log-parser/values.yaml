@@ -3,7 +3,10 @@ replicaCount: 1
 image:
   repository: quay.io/ditto/internal-tooling
   tag: small-peer-log-parser-latest
-  pullPolicy: Always  
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: quay.io-cluster
 
 service:
   type: ClusterIP
