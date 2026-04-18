@@ -1,0 +1,10 @@
+{{- if .Values.teleport.enabled }}
+apiVersion: resources.teleport.dev/v1
+kind: TeleportAppV3
+metadata:
+  name: {{ include "common.fullname" . }}
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  uri: "http://{{ include "common.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+{{- end }}
