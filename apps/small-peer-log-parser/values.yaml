@@ -1,3 +1,5 @@
+fullnameOverride: small-peer-log-parser
+
 replicaCount: 1
 
 image:
