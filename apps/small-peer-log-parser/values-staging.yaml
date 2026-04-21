@@ -1,3 +1,5 @@
+fullnameOverride: small-peer-log-parser-staging
+
 replicaCount: 1
 
 resources:
