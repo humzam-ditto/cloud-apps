@@ -3,6 +3,7 @@ apiVersion: resources.teleport.dev/v1
 kind: TeleportAppV3
 metadata:
   name: {{ include "common.fullname" . }}
+  namespace: teleport-system
   labels:
     {{- include "common.labels" . | nindent 4 }}
 spec:
