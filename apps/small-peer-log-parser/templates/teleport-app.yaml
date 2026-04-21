@@ -7,4 +7,6 @@ metadata:
     {{- include "common.labels" . | nindent 4 }}
 spec:
   uri: "http://{{ include "common.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}"
+  staticLabels:
+    teleport.ditto.live/expose: "true"
 {{- end }}
