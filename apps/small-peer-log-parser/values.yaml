@@ -9,10 +9,8 @@ imagePullSecrets:
   - name: quay.io-cluster
 
 service:
-  type: LoadBalancer
+  type: ClusterIP
   port: 5000
-  annotations:
-    service.beta.kubernetes.io/aws-load-balancer-internal: "true"
 
 resources:
   limits:
