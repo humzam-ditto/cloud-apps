@@ -2,7 +2,7 @@ replicaCount: 1
 
 image:
   repository: quay.io/ditto/internal-tooling
-  tag: small-peer-log-parser-latest
+  tag: small-peer-log-parser-sha-placeholder
   pullPolicy: Always
 
 imagePullSecrets:
@@ -22,14 +22,14 @@ resources:
 
 probes:
   liveness:
-    enabled: false
+    enabled: true
     httpGet:
-      path: /
+      path: /health
     initialDelaySeconds: 10
   readiness:
-    enabled: false
+    enabled: true
     httpGet:
-      path: /
+      path: /health
     initialDelaySeconds: 5
 
 configMap:
