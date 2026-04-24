@@ -1,8 +1,8 @@
 replicaCount: 1
 
 image:
-  repository: quay.io/ditto/internal-tooling
-  tag: small-peer-log-parser-sha-placeholder
+  repository: quay.io/ditto/sp-log-parser
+  tag: sha-placeholder
   pullPolicy: Always
 
 imagePullSecrets:
@@ -35,6 +35,10 @@ probes:
 configMap:
   enabled: false
   mountPath: ""
+
+serviceAccount:
+  create: false
+  annotations: {}
 
 env: []
 podAnnotations: {}
