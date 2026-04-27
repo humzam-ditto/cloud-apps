@@ -1,8 +1,8 @@
 replicaCount: 1
 
 image:
-  repository: quay.io/ditto/internal-tooling
-  tag: small-peer-log-parser-latest
+  repository: quay.io/ditto/sp-log-parser
+  tag: sha-placeholder
   pullPolicy: Always
 
 imagePullSecrets:
@@ -22,19 +22,23 @@ resources:
 
 probes:
   liveness:
-    enabled: false
+    enabled: true
     httpGet:
-      path: /
+      path: /health
     initialDelaySeconds: 10
   readiness:
-    enabled: false
+    enabled: true
     httpGet:
-      path: /
+      path: /health
     initialDelaySeconds: 5
 
 configMap:
   enabled: false
   mountPath: ""
+
+serviceAccount:
+  create: false
+  annotations: {}
 
 env: []
 podAnnotations: {}
