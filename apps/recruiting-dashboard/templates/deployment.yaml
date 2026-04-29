@@ -1,7 +1,7 @@
 {{/*
 Custom deployment — does not use common.deployment because this app requires
-envFrom (ashby-credentials secret) and a startupProbe (Ashby API fetch takes
-~55s before the server is ready). All other helpers are from charts/common.
+a startupProbe (Ashby API fetch takes ~55s before the server is ready).
+All other helpers are from charts/common.
 */}}
 apiVersion: apps/v1
 kind: Deployment
@@ -40,10 +40,6 @@ spec:
               protocol: TCP
           {{- with .Values.env }}
           env:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          {{- with .Values.envFrom }}
-          envFrom:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- with .Values.startupProbe }}

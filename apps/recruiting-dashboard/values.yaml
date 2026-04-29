@@ -42,14 +42,6 @@ startupProbe:
   periodSeconds: 10
   timeoutSeconds: 5
 
-# Injects ASHBY_API_KEY from a manually-created secret. Create once with:
-#   kubectl create secret generic ashby-credentials \
-#     --namespace recruiting-dashboard-staging \
-#     --from-literal=ASHBY_API_KEY=<key>
-envFrom:
-  - secretRef:
-      name: ashby-credentials
-
 configMap:
   enabled: false
   mountPath: ""
@@ -58,7 +50,12 @@ serviceAccount:
   create: false
   annotations: {}
 
-env: []
+env:
+  - name: ASHBY_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: ashby-credentials
+        key: ASHBY_API_KEY
 podAnnotations: {}
 harnessVersion: "0.0.1"
 imageTag: ""
