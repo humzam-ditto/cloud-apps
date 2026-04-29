@@ -1,0 +1,10 @@
+apiVersion: v2
+name: pylon-integrations
+description: Pylon middleware server — Custom Apps, OOO sync, and Linear webhooks
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  - name: common
+    version: "0.1.0"
+    repository: "file://../../charts/common"

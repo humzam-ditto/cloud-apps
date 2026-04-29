@@ -1,0 +1,26 @@
+{{- if .Values.cronJob.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "common.fullname" . }}-ooo-sync
+  labels:
+    {{- include "common.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.cronJob.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ .Values.cronJob.activeDeadlineSeconds }}
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: ooo-sync
+              image: {{ .Values.cronJob.curlImage | quote }}
+              imagePullPolicy: IfNotPresent
+              args:
+                - -f
+                - http://{{ include "common.fullname" . }}:{{ .Values.service.port }}/ooo-calendar-sync
+{{- end }}
