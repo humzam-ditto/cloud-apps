@@ -1,0 +1,42 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: recruiting-dashboard-staging-appset
+  namespace: argo
+spec:
+  generators:
+    - list:
+        elements:
+          - cluster: staging
+            namespace: recruiting-dashboard-staging
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  template:
+    metadata:
+      name: recruiting-dashboard-{{.cluster}}
+      labels:
+        harness.io/envRef: recruitingdashboardstaging
+        harness.io/serviceRef: recruitingdashboardservice
+    spec:
+      project: mgmt-dev-usw2-ops-int-clusters
+      source:
+        repoURL: https://github.com/humzam-ditto/cloud-apps
+        targetRevision: main
+        path: apps/recruiting-dashboard
+        helm:
+          valueFiles:
+            - values.yaml
+            - values-staging.yaml
+            - harness-release.yaml
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: "{{.namespace}}"
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+  syncPolicy:
+    applicationsSync: create-update

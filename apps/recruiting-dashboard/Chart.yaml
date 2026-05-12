@@ -1,0 +1,10 @@
+apiVersion: v2
+name: recruiting-dashboard
+description: Internal recruiting analytics dashboard, powered by Ashby ATS
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+dependencies:
+  - name: common
+    version: "0.1.0"
+    repository: "file://../../charts/common"

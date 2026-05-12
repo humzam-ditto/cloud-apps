@@ -1,0 +1,64 @@
+replicaCount: 1
+
+image:
+  repository: quay.io/ditto/recruiting-dashboard
+  tag: sha-placeholder
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: quay.io-cluster
+
+service:
+  type: ClusterIP
+  port: 8765
+
+resources:
+  limits:
+    cpu: 200m
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+
+probes:
+  liveness:
+    enabled: true
+    httpGet:
+      path: /health
+    initialDelaySeconds: 10
+  readiness:
+    enabled: true
+    httpGet:
+      path: /health
+    initialDelaySeconds: 5
+
+# Allows up to 180s (18 × 10s) for the Ashby API fetch to complete before
+# liveness/readiness probes kick in.
+startupProbe:
+  httpGet:
+    path: /health
+    port: http
+  failureThreshold: 18
+  periodSeconds: 10
+  timeoutSeconds: 5
+
+configMap:
+  enabled: false
+  mountPath: ""
+
+serviceAccount:
+  create: false
+  annotations: {}
+
+env:
+  - name: ASHBY_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: ashby-credentials
+        key: ASHBY_API_KEY
+podAnnotations: {}
+harnessVersion: "0.0.1"
+imageTag: ""
+
+teleport:
+  enabled: true
