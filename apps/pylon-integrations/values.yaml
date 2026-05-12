@@ -1,0 +1,83 @@
+replicaCount: 1
+
+image:
+  repository: quay.io/ditto/pylon-integrations
+  tag: sha-placeholder
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: quay.io-cluster
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+probes:
+  liveness:
+    enabled: true
+    httpGet:
+      path: /health
+    initialDelaySeconds: 10
+  readiness:
+    enabled: true
+    httpGet:
+      path: /health
+    initialDelaySeconds: 5
+
+serviceAccount:
+  create: false
+  annotations: {}
+
+configMap:
+  enabled: false
+  mountPath: ""
+
+env:
+  - name: PORT
+    value: "8000"
+  - name: PYLON_API_URL
+    value: "https://api.usepylon.com"
+  - name: EPHEMERIS_API_URL
+    value: "https://ephemeris-api.prod.k8s.ditto.live"
+  - name: OOO_MIN_HOURS
+    value: "6.0"
+  - name: OOO_SYNC_ENABLED
+    value: "false"
+  - name: LOG_LEVEL
+    value: "INFO"
+  - name: PYLON_API_KEY
+    valueFrom:
+      secretKeyRef:
+        name: pylon-integrations-secrets
+        key: PYLON_API_KEY
+  - name: GOOGLE_CALENDAR_ID
+    valueFrom:
+      secretKeyRef:
+        name: pylon-integrations-secrets
+        key: GOOGLE_CALENDAR_ID
+  - name: GOOGLE_SERVICE_ACCOUNT_JSON
+    valueFrom:
+      secretKeyRef:
+        name: pylon-integrations-secrets
+        key: GOOGLE_SERVICE_ACCOUNT_JSON
+
+podAnnotations: {}
+harnessVersion: "0.0.1"
+imageTag: ""
+
+teleport:
+  enabled: true
+
+cronJob:
+  enabled: true
+  schedule: "0 8 * * *"
+  curlImage: curlimages/curl:8.11.1
+  activeDeadlineSeconds: 300
